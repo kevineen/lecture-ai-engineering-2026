@@ -16,9 +16,10 @@
 
     # 自宅 LAN / Tailscale 上の vLLM・SGLang・LM Studio（OpenAI 互換）
     # --type / --provider で既定ポートを自動選択（vllm=8000 / sglang=30000 / lmstudio=1234）
-    uv run python -m app.ask --type vllm --model Qwen/Qwen2.5-7B-Instruct --chat
-    uv run python -m app.ask --type sglang --model default --chat
-    uv run python -m app.ask --provider lmstudio --model local-model --chat
+    # --model default / local-model / auto なら /v1/models から実名を自動取得
+    uv run python -m app.ask --type vllm --model default --chat
+    uv run python -m app.ask --type sglang --model auto --chat
+    uv run python -m app.ask --provider lmstudio --chat
     # ホストだけ環境変数、ポートは --type で自動:
     #   set AIE_HOST=192.168.1.15
     #   uv run python -m app.ask --type vllm --chat
@@ -46,6 +47,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -55,6 +58,7 @@ from openai import APIConnectionError as OpenAIAPIConnectionError
 from openai import APIStatusError as OpenAIAPIStatusError
 
 from app.config import (
+    DEFAULT_MODEL_LOCAL,
     LOCAL_BASE_URL,
     LOCAL_ENGINE_DEFAULT_PORTS,
     MODEL,
@@ -85,6 +89,16 @@ PROVIDER_CHOICES = (
 LOCAL_TYPE_CHOICES = ("vllm", "sglang", "lmstudio", "lm-studio", "local")
 # 定義漏れ防止（config 側のキーと一致させる）
 assert set(LOCAL_TYPE_CHOICES) == set(LOCAL_ENGINE_DEFAULT_PORTS)
+
+# サーバ未指定時の仮モデル名。/v1/models から実名へ自動解決する
+LOCAL_MODEL_PLACEHOLDERS = frozenset(
+    {
+        DEFAULT_MODEL_LOCAL,
+        "default",
+        "auto",
+        "",
+    }
+)
 
 # 講座に固有の質問。正しい答えは data/glossary.json の homework-levels にある
 DEFAULT_QUESTION = "AIE2026の講座の宿題にある「3レベル」とは何ですか？"
@@ -151,6 +165,72 @@ def effective_base_url(provider: str, base_url: str | None) -> str | None:
     if not is_local_provider(provider):
         return None
     return resolve_local_base_url(provider, base_url)
+
+
+def list_local_model_ids(base_url: str, *, api_key: str | None = None, timeout_s: float = 10.0) -> list[str]:
+    """OpenAI 互換サーバの GET /v1/models からモデル id 一覧を返す。"""
+    root = base_url.rstrip("/")
+    # base_url が .../v1 でも .../v1/ でも models に届くようにする
+    models_url = f"{root}/models" if root.endswith("/v1") else f"{root}/v1/models"
+    key = api_key if api_key is not None else get_local_api_key()
+    req = Request(
+        models_url,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        method="GET",
+    )
+    with urlopen(req, timeout=timeout_s) as resp:  # noqa: S310 — 自宅 LAN / Tailscale 向け
+        payload = json.loads(resp.read().decode("utf-8"))
+    data = payload.get("data") or []
+    ids: list[str] = []
+    for item in data:
+        mid = item.get("id") if isinstance(item, dict) else None
+        if isinstance(mid, str) and mid.strip():
+            ids.append(mid.strip())
+    return ids
+
+
+def resolve_local_model_name(
+    model: str,
+    *,
+    provider: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> str:
+    """仮モデル名（default / local-model / auto）なら /v1/models の先頭を使う。
+
+    明示名はそのまま返す。取得失敗時は分かりやすいエラーで終了する。
+    """
+    name = (model or "").strip()
+    if not is_local_provider(provider):
+        return name
+    if name not in LOCAL_MODEL_PLACEHOLDERS:
+        return name
+
+    url = resolve_local_base_url(provider, base_url)
+    try:
+        ids = list_local_model_ids(url, api_key=api_key)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
+        raise SystemExit(
+            f"モデル名 '{name or DEFAULT_MODEL_LOCAL}' の自動解決に失敗しました: {e}\n"
+            f"  base_url={url}\n"
+            "  /v1/models に届くか確認するか、--model にサーバ上の実名を指定してください。"
+        ) from e
+
+    if not ids:
+        raise SystemExit(
+            f"サーバにモデルがありません（GET {url}/models）。\n"
+            "  vLLM / SGLang でモデルをロードしてから再実行してください。"
+        )
+
+    chosen = ids[0]
+    extra = f"（他 {len(ids) - 1} 件）" if len(ids) > 1 else ""
+    print(
+        f"[model] '{name or DEFAULT_MODEL_LOCAL}' → '{chosen}' に自動解決{extra}",
+        flush=True,
+    )
+    if len(ids) > 1:
+        print(f"  利用可能: {', '.join(ids)}", flush=True)
+    return chosen
 
 
 def _utc_now_iso() -> str:
@@ -609,7 +689,10 @@ def main() -> None:
     parser.add_argument(
         "--model",
         default=MODEL,
-        help="モデル名（既定: 環境変数 AIE_MODEL またはプロバイダ既定）",
+        help=(
+            "モデル名（既定: 環境変数 AIE_MODEL またはプロバイダ既定）。"
+            "local 系で default / local-model / auto のときは /v1/models から自動解決"
+        ),
     )
     parser.add_argument(
         "--temperature",
@@ -663,13 +746,13 @@ def main() -> None:
         except ValueError as e:
             raise SystemExit(f"--temperature が不正です: {e}") from e
 
-    # local 系で base-url 未指定でも環境変数既定で動くが、モデル名が仮のままなら注意を出す
-    if is_local_provider(provider) and args.model == "local-model":
-        print(
-            "[注意] --model / AIE_MODEL が未設定のため 'local-model' を使います。"
-            "サーバ側の /v1/models で実際の名前を確認してください。",
-            flush=True,
-        )
+    # local 系: default / local-model / auto なら /v1/models から実名を取得
+    model = resolve_local_model_name(
+        args.model,
+        provider=provider,
+        base_url=args.base_url,
+        api_key=args.api_key,
+    )
 
     # 引数なし、または --chat → 対話。引数のみ → 1問（履歴なし相当の単発でもセッション保存可）
     chat_mode = args.chat or args.question is None
@@ -680,7 +763,7 @@ def main() -> None:
     if chat_mode:
         interactive_loop(
             provider=provider,
-            model=args.model,
+            model=model,
             temperature=temperature,
             first_question=first,
             save=args.save,
@@ -693,10 +776,10 @@ def main() -> None:
     # 単発モード（従来どおり1問。比較用に outputs にも残せる）
     history: list[dict[str, str]] = []
     resolved_base = effective_base_url(provider, args.base_url)
-    released = lookup_release_date(args.model, provider=provider)
+    released = lookup_release_date(model, provider=provider)
     session = ExperimentSession(
         provider=provider,
-        model=args.model,
+        model=model,
         temperature=temperature,
         started_at=_utc_now_iso(),
         notes=args.notes,
@@ -705,7 +788,7 @@ def main() -> None:
     )
     _print_session_header(
         provider=provider,
-        model=args.model,
+        model=model,
         temperature=temperature,
         base_url=resolved_base,
         model_released=released,
@@ -716,7 +799,7 @@ def main() -> None:
             history,
             first,  # type: ignore[arg-type]
             provider=provider,
-            model=args.model,
+            model=model,
             temperature=temperature,
             session=session,
             base_url=args.base_url,
