@@ -5,10 +5,33 @@
     uv run python -m app.ask --chat
     uv run python -m app.ask --provider openrouter --model openai/gpt-4o-mini --temperature 0.2 --chat
 
+    # temperature を変えて揺らぎを比較（低いほど決定的、高いほど多様）
+    uv run python -m app.ask --temperature 0 "同じ質問で決定的な返答"
+    uv run python -m app.ask --temperature 1.0 "同じ質問で多様な返答"
+
+    # 対話中は /temp でその場で変更できる（履歴は保持）
+    #   /temp          … 現在値を表示
+    #   /temp 0.2      … 0.2 に設定
+    #   /temp default  … API 既定に戻す
+
+    # 自宅 LAN / Tailscale 上の vLLM・SGLang・LM Studio（OpenAI 互換）
+    # --type / --provider で既定ポートを自動選択（vllm=8000 / sglang=30000 / lmstudio=1234）
+    uv run python -m app.ask --type vllm --model Qwen/Qwen2.5-7B-Instruct --chat
+    uv run python -m app.ask --type sglang --model default --chat
+    uv run python -m app.ask --provider lmstudio --model local-model --chat
+    # ホストだけ環境変数、ポートは --type で自動:
+    #   set AIE_HOST=192.168.1.15
+    #   uv run python -m app.ask --type vllm --chat
+    # ポートも含めて明示したいときだけ --base-url を使う
+    uv run python -m app.ask --type vllm --base-url http://100.64.0.12:8001/v1 --chat
+
 環境変数:
-    AIE_PROVIDER=gemini|openrouter
+    AIE_PROVIDER=gemini|openrouter|local|vllm|sglang|lmstudio
     AIE_MODEL=...
     AIE_TEMPERATURE=0.2
+    AIE_HOST=192.168.1.15              # local 系のホスト（ポートは --type で自動）
+    AIE_BASE_URL=http://host:port/v1   # local 系（LOCAL_BASE_URL でも可。ホスト抽出にも使う）
+    AIE_API_KEY=...                    # local 系は任意（未設定なら EMPTY）
     GEMINI_API_KEY / OPENROUTER_API_KEY
 
 実験ログは outputs/ に JSON で保存する（.gitignore 済み。git には上げない）。
@@ -28,17 +51,40 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from openai import OpenAI
+from openai import APIConnectionError as OpenAIAPIConnectionError
 from openai import APIStatusError as OpenAIAPIStatusError
 
 from app.config import (
+    LOCAL_BASE_URL,
+    LOCAL_ENGINE_DEFAULT_PORTS,
     MODEL,
     OPENROUTER_BASE_URL,
     PROVIDER,
     TEMPERATURE,
     api_error_message,
     get_gemini_api_key,
+    get_local_api_key,
     get_openrouter_api_key,
+    is_local_provider,
+    resolve_local_base_url,
 )
+from app.model_releases import format_release_date, lookup_release_date
+
+# CLI / 環境変数で使えるプロバイダ名
+PROVIDER_CHOICES = (
+    "gemini",
+    "openrouter",
+    "local",
+    "vllm",
+    "sglang",
+    "lmstudio",
+    "lm-studio",
+)
+
+# --type 用（ローカル推論エンジンのみ。ポート自動選択の対象）
+LOCAL_TYPE_CHOICES = ("vllm", "sglang", "lmstudio", "lm-studio", "local")
+# 定義漏れ防止（config 側のキーと一致させる）
+assert set(LOCAL_TYPE_CHOICES) == set(LOCAL_ENGINE_DEFAULT_PORTS)
 
 # 講座に固有の質問。正しい答えは data/glossary.json の homework-levels にある
 DEFAULT_QUESTION = "AIE2026の講座の宿題にある「3レベル」とは何ですか？"
@@ -56,6 +102,10 @@ class Turn:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     elapsed_ms: int | None = None
+    # 出力トークン / 応答秒（実験ログ・表示用）
+    tokens_per_sec: float | None = None
+    # アシスタント応答時に使った temperature（対話中の /temp 変更をログに残す）
+    temperature: float | None = None
 
 
 @dataclass
@@ -69,19 +119,38 @@ class ExperimentSession:
     ended_at: str | None = None
     turns: list[Turn] = field(default_factory=list)
     notes: str = ""
+    # local 系の接続先（再現用。クラウド系は None）
+    base_url: str | None = None
+    # モデル公開日 YYYY-MM-DD（不明なら None）
+    model_released: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "provider": self.provider,
+            "model": self.model,
+            "temperature": self.temperature,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "notes": self.notes,
+        }
+        if self.base_url is not None:
+            meta["base_url"] = self.base_url
+        if self.model_released is not None:
+            meta["model_released"] = self.model_released
         return {
-            "meta": {
-                "provider": self.provider,
-                "model": self.model,
-                "temperature": self.temperature,
-                "started_at": self.started_at,
-                "ended_at": self.ended_at,
-                "notes": self.notes,
-            },
+            "meta": meta,
             "turns": [asdict(t) for t in self.turns],
         }
+
+
+def effective_base_url(provider: str, base_url: str | None) -> str | None:
+    """実験ログ・表示用の実効 base_url（local 系のみ）。
+
+    --type vllm 等ではエンジン既定ポートを自動適用する。
+    """
+    if not is_local_provider(provider):
+        return None
+    return resolve_local_base_url(provider, base_url)
 
 
 def _utc_now_iso() -> str:
@@ -116,6 +185,90 @@ def _print_usage(prompt_tokens: int | None, completion_tokens: int | None) -> No
         print(f"[出力トークン数] {completion_tokens}")
 
 
+def calc_tokens_per_sec(
+    completion_tokens: int | None,
+    elapsed_ms: int,
+) -> float | None:
+    """出力トークン数と経過時間から tok/s を求める。計測不能なら None。"""
+    if completion_tokens is None or completion_tokens < 0 or elapsed_ms <= 0:
+        return None
+    return completion_tokens / (elapsed_ms / 1000.0)
+
+
+def format_tokens_per_sec(tokens_per_sec: float | None) -> str | None:
+    """表示用の tok/s 文字列。算出不能なら None。"""
+    if tokens_per_sec is None:
+        return None
+    return f"{tokens_per_sec:.1f} tok/s"
+
+
+def format_temperature(temperature: float | None) -> str:
+    """表示用の temperature 文字列。"""
+    return "(API既定)" if temperature is None else str(temperature)
+
+
+def parse_temperature_value(raw: str) -> float | None:
+    """CLI / 対話コマンド用に temperature 文字列を解釈する。
+
+    数値 → float、default/none/api（大小無視）→ None（API 既定）。
+    解釈できない場合は ValueError。
+    """
+    text = raw.strip().lower()
+    if text in {"default", "none", "api", "null"}:
+        return None
+    value = float(text)
+    # 主要 API の一般的な範囲。外れ値は誤入力の可能性が高いので拒否する
+    if not 0.0 <= value <= 2.0:
+        raise ValueError("temperature は 0.0〜2.0 の範囲で指定してください")
+    return value
+
+
+def try_handle_chat_command(
+    line: str,
+    *,
+    temperature: float | None,
+    session: ExperimentSession,
+) -> tuple[bool, float | None]:
+    """対話中のスラッシュコマンドを処理する。
+
+    戻り値: (処理したか, 新しい temperature)。
+    未対応の行なら (False, temperature) のまま。
+    """
+    stripped = line.strip()
+    if not stripped.startswith("/"):
+        return False, temperature
+
+    parts = stripped.split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd in {"/temp", "/temperature"}:
+        if not arg:
+            print(f"[temperature] {format_temperature(temperature)}")
+            return True, temperature
+        try:
+            new_temp = parse_temperature_value(arg)
+        except ValueError as e:
+            print(f"temperature の指定が不正です: {e}")
+            print("例: /temp 0.2  /temp 1.0  /temp default")
+            return True, temperature
+        session.temperature = new_temp
+        print(f"[temperature] {format_temperature(temperature)} → {format_temperature(new_temp)}")
+        return True, new_temp
+
+    if cmd in {"/help", "/?"}:
+        print(
+            "コマンド:\n"
+            "  /temp [値]   temperature の表示・変更（例: /temp 0.2 /temp default）\n"
+            "  /help        このヘルプ\n"
+            "  exit / quit  終了"
+        )
+        return True, temperature
+
+    print(f"未知のコマンドです: {cmd}（/help で一覧）")
+    return True, temperature
+
+
 def ask_gemini(
     messages: list[dict[str, str]],
     *,
@@ -145,14 +298,20 @@ def ask_gemini(
     return response.text or "", prompt_tokens, completion_tokens
 
 
-def ask_openrouter(
+def ask_openai_compatible(
     messages: list[dict[str, str]],
     *,
     model: str,
     temperature: float | None,
+    base_url: str,
+    api_key: str,
 ) -> tuple[str, int | None, int | None]:
-    """OpenRouter（OpenAI 互換）に履歴付きで問い合わせる。"""
-    client = OpenAI(base_url=OPENROUTER_BASE_URL, api_key=get_openrouter_api_key())
+    """OpenAI 互換 Chat Completions API に履歴付きで問い合わせる。
+
+    OpenRouter・vLLM・SGLang・LM Studio など、/v1/chat/completions を持つサーバ向け。
+    """
+    # base_url は末尾スラッシュ無しを想定（openai SDK が path を結合する）
+    client = OpenAI(base_url=base_url.rstrip("/"), api_key=api_key)
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if temperature is not None:
         kwargs["temperature"] = temperature
@@ -165,19 +324,68 @@ def ask_openrouter(
     return text, prompt_tokens, completion_tokens
 
 
+def ask_openrouter(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    temperature: float | None,
+) -> tuple[str, int | None, int | None]:
+    """OpenRouter（OpenAI 互換）に履歴付きで問い合わせる。"""
+    return ask_openai_compatible(
+        messages,
+        model=model,
+        temperature=temperature,
+        base_url=OPENROUTER_BASE_URL,
+        api_key=get_openrouter_api_key(),
+    )
+
+
+def ask_local(
+    messages: list[dict[str, str]],
+    *,
+    model: str,
+    temperature: float | None,
+    base_url: str,
+    api_key: str | None = None,
+) -> tuple[str, int | None, int | None]:
+    """自宅 LAN / Tailscale 上の vLLM・SGLang・LM Studio に問い合わせる。"""
+    return ask_openai_compatible(
+        messages,
+        model=model,
+        temperature=temperature,
+        base_url=base_url,
+        api_key=api_key if api_key is not None else get_local_api_key(),
+    )
+
+
 def ask_once(
     messages: list[dict[str, str]],
     *,
     provider: str,
     model: str,
     temperature: float | None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> tuple[str, int | None, int | None]:
     """プロバイダに応じて1回呼び出す。messages は OpenAI 形式（user/assistant）。"""
     if provider == "openrouter":
         return ask_openrouter(messages, model=model, temperature=temperature)
     if provider == "gemini":
         return ask_gemini(messages, model=model, temperature=temperature)
-    raise SystemExit(f"未対応のプロバイダです: {provider}（gemini / openrouter）")
+    if is_local_provider(provider):
+        # --base-url 明示 > エンジン既定ポート（--type vllm 等）> LOCAL_BASE_URL
+        url = resolve_local_base_url(provider, base_url)
+        return ask_local(
+            messages,
+            model=model,
+            temperature=temperature,
+            base_url=url,
+            api_key=api_key,
+        )
+    raise SystemExit(
+        f"未対応のプロバイダです: {provider}"
+        f"（{' / '.join(PROVIDER_CHOICES)}）"
+    )
 
 
 def run_turn(
@@ -188,6 +396,8 @@ def run_turn(
     model: str,
     temperature: float | None,
     session: ExperimentSession | None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """1往復して履歴と実験セッションを更新し、応答本文を返す。"""
     import time
@@ -202,8 +412,12 @@ def run_turn(
         provider=provider,
         model=model,
         temperature=temperature,
+        base_url=base_url,
+        api_key=api_key,
     )
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    # 出力スループット（completion トークン ÷ 応答秒）
+    tokens_per_sec = calc_tokens_per_sec(completion_tokens, elapsed_ms)
 
     history.append({"role": "assistant", "content": answer})
     if session is not None:
@@ -214,12 +428,42 @@ def run_turn(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 elapsed_ms=elapsed_ms,
+                tokens_per_sec=tokens_per_sec,
+                temperature=temperature,
             )
         )
 
     _print_usage(prompt_tokens, completion_tokens)
-    print(f"[応答時間] {elapsed_ms} ms")
+    # 例: [応答時間] 3837 ms (134.7 tok/s)
+    tps_label = format_tokens_per_sec(tokens_per_sec)
+    if tps_label is not None:
+        print(f"[応答時間] {elapsed_ms} ms ({tps_label})")
+    else:
+        print(f"[応答時間] {elapsed_ms} ms")
+    print(f"[temperature] {format_temperature(temperature)}")
     return answer
+
+
+def _print_session_header(
+    *,
+    provider: str,
+    model: str,
+    temperature: float | None,
+    base_url: str | None,
+    save: bool | None = None,
+    model_released: str | None = None,
+) -> None:
+    """対話・単発共通の設定表示。"""
+    print(f"[provider] {provider}")
+    # モデル名と公開日を同じ行に表示（不明時は (不明)）
+    released = model_released or format_release_date(model, provider=provider)
+    print(f"[model] {model}  (公開日: {released})")
+    print(f"[temperature] {format_temperature(temperature)}")
+    # local 系だけ endpoint を明示（接続先の取り違え防止）
+    if is_local_provider(provider):
+        print(f"[base_url] {base_url or resolve_local_base_url(provider)}")
+    if save is not None:
+        print(f"[save] {'outputs/ に保存' if save else 'しない'}")
 
 
 def interactive_loop(
@@ -230,22 +474,34 @@ def interactive_loop(
     first_question: str | None,
     save: bool,
     notes: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> None:
-    """終了するまで会話を続ける（履歴を保持）。"""
+    """終了するまで会話を続ける（履歴を保持）。/temp で temperature を途中変更可。"""
     history: list[dict[str, str]] = []
+    # 対話中に /temp で書き換えるため、ローカル変数として保持
+    current_temperature = temperature
+    resolved_base = effective_base_url(provider, base_url)
+    released = lookup_release_date(model, provider=provider)
     session = ExperimentSession(
         provider=provider,
         model=model,
-        temperature=temperature,
+        temperature=current_temperature,
         started_at=_utc_now_iso(),
         notes=notes,
+        base_url=resolved_base,
+        model_released=released,
     )
 
-    print(f"[provider] {provider}")
-    print(f"[model] {model}")
-    print(f"[temperature] {temperature if temperature is not None else '(API既定)'}")
-    print(f"[save] {'outputs/ に保存' if save else 'しない'}")
-    print("終了するには exit / quit / 空行を入力\n")
+    _print_session_header(
+        provider=provider,
+        model=model,
+        temperature=current_temperature,
+        base_url=resolved_base,
+        save=save,
+        model_released=released,
+    )
+    print("終了: exit / quit / 空行 ｜ 設定変更: /temp 0.2 ｜ ヘルプ: /help\n")
 
     pending = first_question
 
@@ -266,20 +522,40 @@ def interactive_loop(
                 print("終了します")
                 break
 
+            # /temp などで推論パラメータをその場で変える（履歴は消さない）
+            handled, current_temperature = try_handle_chat_command(
+                question,
+                temperature=current_temperature,
+                session=session,
+            )
+            if handled:
+                continue
+
             try:
                 answer = run_turn(
                     history,
                     question,
                     provider=provider,
                     model=model,
-                    temperature=temperature,
+                    temperature=current_temperature,
                     session=session,
+                    base_url=base_url,
+                    api_key=api_key,
                 )
             except genai_errors.APIError as e:
                 print(api_error_message(e.code, e.message))
                 raise SystemExit(1) from e
             except OpenAIAPIStatusError as e:
                 print(api_error_message(e.status_code, str(e)))
+                raise SystemExit(1) from e
+            except (OpenAIAPIConnectionError, OSError) as e:
+                # 接続拒否・タイムアウトなど（自宅サーバ未起動・Tailscale 未接続）
+                print(
+                    f"ローカルサーバに接続できません: {e}\n"
+                    f"  base_url={resolved_base or base_url or LOCAL_BASE_URL}\n"
+                    "  vLLM / SGLang / LM Studio が起動しているか、"
+                    "Tailscale / LAN の疎通を確認してください。"
+                )
                 raise SystemExit(1) from e
 
             print(f"モデル> {answer}\n")
@@ -291,7 +567,9 @@ def interactive_loop(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LLMに質問する（Gemini / OpenRouter、対話・実験保存対応）"
+        description=(
+            "LLMに質問する（Gemini / OpenRouter / ローカル OpenAI 互換、対話・実験保存対応）"
+        )
     )
     parser.add_argument(
         "question",
@@ -306,9 +584,27 @@ def main() -> None:
     )
     parser.add_argument(
         "--provider",
-        choices=("gemini", "openrouter"),
-        default=PROVIDER,
-        help="API プロバイダ（既定: 環境変数 AIE_PROVIDER または gemini）",
+        choices=PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "API プロバイダ（既定: 環境変数 AIE_PROVIDER または gemini）。"
+            "local / vllm / sglang / lmstudio は自宅・Tailscale 上の OpenAI 互換サーバ向け。"
+            "vllm / sglang / lmstudio 指定時は既定ポートを自動選択（--type と同じ）"
+        ),
+    )
+    parser.add_argument(
+        "--type",
+        dest="engine_type",
+        choices=LOCAL_TYPE_CHOICES,
+        default=None,
+        help=(
+            "ローカル推論エンジン（vllm / sglang / lmstudio / local）。"
+            "指定すると --provider より優先し、既定ポートを自動選択する "
+            f"（vllm={LOCAL_ENGINE_DEFAULT_PORTS['vllm']} / "
+            f"sglang={LOCAL_ENGINE_DEFAULT_PORTS['sglang']} / "
+            f"lmstudio={LOCAL_ENGINE_DEFAULT_PORTS['lmstudio']}）。"
+            "ホストは AIE_HOST または AIE_BASE_URL から取得"
+        ),
     )
     parser.add_argument(
         "--model",
@@ -317,9 +613,30 @@ def main() -> None:
     )
     parser.add_argument(
         "--temperature",
-        type=float,
-        default=TEMPERATURE,
-        help="temperature（既定: 環境変数 AIE_TEMPERATURE。未指定なら API 既定）",
+        type=str,
+        default=None,
+        help=(
+            "temperature 0.0〜2.0（低いほど決定的、高いほど多様）。"
+            "既定: 環境変数 AIE_TEMPERATURE。未指定・default なら API 既定。"
+            "対話中は /temp でも変更可"
+        ),
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help=(
+            "OpenAI 互換 API のベース URL（local 系向け・明示指定時はポート自動選択を上書き）。"
+            "例: http://100.x.x.x:8000/v1 。未指定なら --type の既定ポート + "
+            f"AIE_HOST / AIE_BASE_URL（例: {LOCAL_BASE_URL}）"
+        ),
+    )
+    parser.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "local 系の API キー（任意）。未指定なら AIE_API_KEY / LOCAL_API_KEY / EMPTY。"
+            "キーをシェル履歴に残したくない場合は環境変数を推奨"
+        ),
     )
     parser.add_argument(
         "--save",
@@ -334,6 +651,26 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # --type が最優先。なければ --provider、それもなければ環境変数 AIE_PROVIDER
+    provider = (args.engine_type or args.provider or PROVIDER).strip().lower()
+
+    # --temperature 未指定なら環境変数、指定ありならパース（default で API 既定に戻せる）
+    if args.temperature is None:
+        temperature = TEMPERATURE
+    else:
+        try:
+            temperature = parse_temperature_value(args.temperature)
+        except ValueError as e:
+            raise SystemExit(f"--temperature が不正です: {e}") from e
+
+    # local 系で base-url 未指定でも環境変数既定で動くが、モデル名が仮のままなら注意を出す
+    if is_local_provider(provider) and args.model == "local-model":
+        print(
+            "[注意] --model / AIE_MODEL が未設定のため 'local-model' を使います。"
+            "サーバ側の /v1/models で実際の名前を確認してください。",
+            flush=True,
+        )
+
     # 引数なし、または --chat → 対話。引数のみ → 1問（履歴なし相当の単発でもセッション保存可）
     chat_mode = args.chat or args.question is None
     first = args.question
@@ -342,36 +679,48 @@ def main() -> None:
 
     if chat_mode:
         interactive_loop(
-            provider=args.provider,
+            provider=provider,
             model=args.model,
-            temperature=args.temperature,
+            temperature=temperature,
             first_question=first,
             save=args.save,
             notes=args.notes,
+            base_url=args.base_url,
+            api_key=args.api_key,
         )
         return
 
     # 単発モード（従来どおり1問。比較用に outputs にも残せる）
     history: list[dict[str, str]] = []
+    resolved_base = effective_base_url(provider, args.base_url)
+    released = lookup_release_date(args.model, provider=provider)
     session = ExperimentSession(
-        provider=args.provider,
+        provider=provider,
         model=args.model,
-        temperature=args.temperature,
+        temperature=temperature,
         started_at=_utc_now_iso(),
         notes=args.notes,
+        base_url=resolved_base,
+        model_released=released,
     )
-    print(f"[provider] {args.provider}")
-    print(f"[model] {args.model}")
-    print(f"[temperature] {args.temperature if args.temperature is not None else '(API既定)'}")
+    _print_session_header(
+        provider=provider,
+        model=args.model,
+        temperature=temperature,
+        base_url=resolved_base,
+        model_released=released,
+    )
     print(f"[質問] {first}\n")
     try:
         answer = run_turn(
             history,
             first,  # type: ignore[arg-type]
-            provider=args.provider,
+            provider=provider,
             model=args.model,
-            temperature=args.temperature,
+            temperature=temperature,
             session=session,
+            base_url=args.base_url,
+            api_key=args.api_key,
         )
         print(answer)
     except genai_errors.APIError as e:
@@ -379,6 +728,14 @@ def main() -> None:
         raise SystemExit(1) from e
     except OpenAIAPIStatusError as e:
         print(api_error_message(e.status_code, str(e)))
+        raise SystemExit(1) from e
+    except (OpenAIAPIConnectionError, OSError) as e:
+        print(
+            f"ローカルサーバに接続できません: {e}\n"
+            f"  base_url={resolved_base or args.base_url or LOCAL_BASE_URL}\n"
+            "  vLLM / SGLang / LM Studio が起動しているか、"
+            "Tailscale / LAN の疎通を確認してください。"
+        )
         raise SystemExit(1) from e
     finally:
         if args.save and session.turns:
