@@ -10,5 +10,8 @@ __pycache__/
 # 個人の学習ログ（第3回の宿題で作成）は共有しない
 learning_log/
 
+# 第1回など: モデル比較の実験ログ（temperature 等の設定・応答）は共有しない
+outputs/
+
 # macOS
 .DS_Store

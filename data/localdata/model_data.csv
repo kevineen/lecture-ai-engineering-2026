@@ -1,0 +1,30 @@
+id,model名,公開日,出典,メモ
+gemini-3.5-flash-lite,Gemini 3.5 Flash-Lite,2026-07-21,https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-6-flash-3-5-flash-lite-3-5-flash-cyber/,講座既定モデル
+gemini-3.5-flash,Gemini 3.5 Flash,2026-05-19,https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-5/,
+gemini-3.6-flash,Gemini 3.6 Flash,2026-07-21,https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-6-flash-3-5-flash-lite-3-5-flash-cyber/,
+gemini-3.7-flash,Gemini 3.7 Flash,2026-08-13,https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-3-7-flash/,
+gemini-3.8-flash,Gemini 3.8 Flash,2026-09-02,https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/,
+gemini-3.1-flash-lite,Gemini 3.1 Flash-Lite,2026-03-03,https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite/,
+gemini-3.1-pro,Gemini 3.1 Pro,2026-02-19,https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-pro/,
+gemini-3-flash,Gemini 3 Flash,2025-12-17,https://blog.google/products-and-platforms/products/gemini/gemini-3-flash/,
+gemini-3-pro,Gemini 3 Pro,2025-11-18,https://blog.google/products-and-platforms/products/gemini/gemini-3/,
+gemini-2.5-flash-lite,Gemini 2.5 Flash-Lite,2025-06-17,https://developers.googleblog.com/en/gemini-2-5-thinking-model-updates/,
+gemini-2.5-flash,Gemini 2.5 Flash,2025-04-17,https://blog.google/products-and-platforms/products/gemini/gemini-2-5-flash-preview/,
+gemini-2.5-pro,Gemini 2.5 Pro,2025-03-25,https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-model-thinking-updates-march-2025/,
+gemini-2.0-flash,Gemini 2.0 Flash,2025-02-05,https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-model-updates-february-2025/,
+gemini-2.0-flash-lite,Gemini 2.0 Flash-Lite,2025-02-05,https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-model-updates-february-2025/,
+gemini-1.5-flash,Gemini 1.5 Flash,2024-05-14,https://blog.google/technology/ai/google-gemini-update-flash-ai-assistant-io-2024/,
+gemini-1.5-pro,Gemini 1.5 Pro,2024-02-15,https://blog.google/innovation-and-ai/products/google-gemini-next-generation-model-february-2024/,
+openai/gpt-4o-mini,GPT-4o mini,2024-07-18,https://openai.com/index/gpt-4o-mini-advancing-cost-efficient-intelligence/,OpenRouter 既定
+gpt-4o-mini,GPT-4o mini,2024-07-18,https://openai.com/index/gpt-4o-mini-advancing-cost-efficient-intelligence/,短縮名
+openai/gpt-4o,GPT-4o,2024-05-13,https://openai.com/index/hello-gpt-4o/,
+gpt-4o,GPT-4o,2024-05-13,https://openai.com/index/hello-gpt-4o/,
+openai/gpt-4.1,GPT-4.1,2025-04-14,https://openai.com/index/gpt-4-1/,
+openai/gpt-5,GPT-5,2025-08-07,https://openai.com/index/introducing-gpt-5/,
+Qwen/Qwen2.5-7B-Instruct,Qwen2.5-7B-Instruct,2024-09-19,https://qwenlm.github.io/blog/qwen2.5/,ローカル vLLM 等でよく使う
+Qwen/Qwen2.5-14B-Instruct,Qwen2.5-14B-Instruct,2024-09-19,https://qwenlm.github.io/blog/qwen2.5/,
+Qwen/Qwen2.5-32B-Instruct,Qwen2.5-32B-Instruct,2024-09-19,https://qwenlm.github.io/blog/qwen2.5/,
+Qwen/Qwen2.5-72B-Instruct,Qwen2.5-72B-Instruct,2024-09-19,https://qwenlm.github.io/blog/qwen2.5/,
+Qwen/Qwen3-8B,Qwen3-8B,2025-04-29,https://qwenlm.github.io/blog/qwen3/,
+Qwen/Qwen3-32B,Qwen3-32B,2025-04-29,https://qwenlm.github.io/blog/qwen3/,
+nvidia/Gemma-4-31B-IT-NVFP4,Gemma 4 31B IT NVFP4,2026-04-02,https://huggingface.co/nvidia/Gemma-4-31B-IT-NVFP4/,
