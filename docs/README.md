@@ -16,6 +16,15 @@
 Cursor など多くのツールは **リポジトリ直下の `AGENTS.md`** をプロジェクト指示として読みます。  
 docs の詳細ルールは `docs/agent/INSTRUCTIONS.md`、学習メモは `docs/agent/study/` に分けます。
 
+## Git ブランチ方針（要約）
+
+| ブランチ | 用途 |
+|---|---|
+| `main` / `lecNN` | 講座提出。提出後はその回の提出物を触らない |
+| `personal/lab` | 個人拡張を使い回し・更新。提出 PR には載せない |
+
+手順の詳細は [`usage/git-workflow.md`](usage/git-workflow.md)（gitignore・ローカル用）。
+
 ## 更新・追加のルール
 
 エージェントが構造を変えるときは必ず [`docs/agent/INSTRUCTIONS.md`](agent/INSTRUCTIONS.md) に従う。要約:
@@ -24,14 +33,16 @@ docs の詳細ルールは `docs/agent/INSTRUCTIONS.md`、学習メモは `docs/
 2. **短い方針** → ルート `AGENTS.md`
 3. **このリポの実装文脈** → `docs/agent/project/` + `project/INDEX.md`
 4. **Hermes / Pi 等の勉強** → `docs/agent/study/` + `study/INDEX.md`
-5. **講座の正式課題** → `lectures/NN/problem.md`（提出対象）
+5. **講座の正式課題文** → `lectures/NN/problem.md`（**編集禁止**。提出で書くのは `answer.md`）
 6. 個人用詳細は提出 PR に含めない（gitignore）
+7. 個人拡張のコード変更は `personal/lab`。提出ブランチ `lecNN` に混ぜない
 
 ## 初期ファイル（ローカル・git 対象外の例）
 
 - `AGENTS.md` … エージェント入口（第2回: finetune / Streamlit / uv group 注意を含む）
+- `docs/usage/git-workflow.md` … 提出ブランチと `personal/lab` の運用
 - `docs/usage/finetune.md` … CLI・依存・HP 比較・result.json
-- `docs/usage/streamlit.md` … 3タブ UI・トラブルシュート
+- `docs/usage/streamlit.md` … UI・トラブルシュート
 - `docs/usage/INDEX.md`
 - `docs/agent/INSTRUCTIONS.md` / `README.md`
 - `docs/agent/project/finetune-context.md` … 実装 API・設計方針
