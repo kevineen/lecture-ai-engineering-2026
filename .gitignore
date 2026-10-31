@@ -13,5 +13,16 @@ learning_log/
 # 第1回など: モデル比較の実験ログ（temperature 等の設定・応答）は共有しない
 outputs/
 
+# データセットごとのメモ（sidecar）も個人用の学習ログとして共有しない
+data/sft/memos/
+
+# 個人用ドキュメント（使い方メモ・エージェント向けコンテキスト）。配置ルールは docs/README.md
+# ルート AGENTS.md は Cursor 等が自動参照しやすい入口（提出物には含めない）
+AGENTS.md
+docs/usage/**
+!docs/usage/.gitkeep
+docs/agent/**
+!docs/agent/.gitkeep
+
 # macOS
 .DS_Store

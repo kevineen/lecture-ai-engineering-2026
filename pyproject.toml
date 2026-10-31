@@ -13,6 +13,17 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# Streamlit UI（データセット作成・実験結果表示）
+ui = ["streamlit>=1.40", "pandas>=2.2"]
+# ローカル LoRA 学習（ノートブックの PINS に合わせる。torch は CUDA 版を別途）
+finetune = [
+    "transformers==5.18.0",
+    "peft==0.21.1",
+    "trl==1.14.2",
+    "accelerate==1.15.0",
+    "datasets==5.1.0",
+    "pandas>=2.2",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

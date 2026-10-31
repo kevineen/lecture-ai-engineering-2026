@@ -40,6 +40,8 @@ uv run python -m app.ask "LoRAとは何ですか？"
 app/
   config.py      モデル名とAPIキーの読み込み
   ask.py         第1回：LLMに質問する
+  finetune.py    第2回：LoRA 学習・実験管理（result.json / outputs/finetune）
+  streamlit_app.py 第2回：データセット作成・学習キュー・結果比較 UI
   tools.py       第3回：エージェントのツール（用語集の検索など）
   agent.py       第3回：Pydantic AI の学習支援エージェント（第5回：--mcp で MCP 経由）
   mcp_server.py  第5回：用語集を公開する MCP サーバー
@@ -47,14 +49,30 @@ app/
 data/
   glossary.json  講座の用語集
   lectures/      各回の要点
+  sft/           第2回：SFT 用 JSONL（Streamlit / finetune が読み書き）
 lectures/NN/
   problem.md     その回の演習と宿題
   answer.md      あなたが記入して提出するファイル
 notebooks/       第2回：Google Colab で動かす LoRA のノートブック（lora_format_tuning.ipynb）
+docs/            個人用ドキュメント（配置は docs/README.md。agent/INSTRUCTIONS・study=学習資料。gitignore）
 scripts/         補助スクリプト
 tests/           テスト（APIキー不要）
 pyproject.toml / uv.lock  依存パッケージとその固定版
 ```
+
+## 第2回（LoRA・実験管理）の補足
+
+授業本体は Colab のノートブックです。手元での CLI / Streamlit の詳細手順は **個人用ドキュメント** [`docs/`](docs/README.md) に置きます（`docs/usage/`・`docs/agent/` は gitignore。提出 PR に含めません）。
+
+```bash
+# UI と学習を両方使うときは group を同時指定（片方だけ sync すると相手が外れる）
+uv sync --group ui --group finetune
+# torch（CUDA 版）は環境に合わせて別途入れる
+uv run streamlit run app/streamlit_app.py
+uv run python -m app.finetune --help
+```
+
+個人用の手順書: `docs/usage/finetune.md`（CLI）・`docs/usage/streamlit.md`（UI）。
 
 ## 提出のしかた
 
