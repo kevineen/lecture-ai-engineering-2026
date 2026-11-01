@@ -1,0 +1,95 @@
+{
+  "run_id": "20261101_160852__space_tour_epochs_40",
+  "run_note": "space_tour_epochs_40",
+  "lab_id": null,
+  "memo": "",
+  "config": {
+    "base_model": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "seed": 42,
+    "num_train_epochs": 40,
+    "warmup_steps": 6,
+    "lr": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_seq_len": 512,
+    "max_new_tokens": 96,
+    "gen": {
+      "do_sample": false
+    },
+    "run_note": "space_tour_epochs_40",
+    "dataset": "space_tour",
+    "dataset_n": 14,
+    "dataset_fingerprint": "b7d96be475bc",
+    "dataset_split": {
+      "train": 14,
+      "valid": 7,
+      "test": 21
+    }
+  },
+  "versions": {
+    "transformers": "5.18.0",
+    "peft": "0.21.1",
+    "trl": "1.14.2",
+    "torch": "2.11.0+cu128"
+  },
+  "method": "LoRA（量子化なし）",
+  "train": {
+    "last_loss": 0.014951774850487709,
+    "training_seconds": 143.4,
+    "global_step": 80,
+    "epoch": 40.0
+  },
+  "before": {
+    "label": "before",
+    "n": 21,
+    "format_rate": 0.19047619047619047,
+    "content_rate": 0.0,
+    "both_rate": 0.0,
+    "seconds": 24.0
+  },
+  "after": {
+    "label": "after",
+    "n": 21,
+    "format_rate": 1.0,
+    "content_rate": 0.8095238095238095,
+    "both_rate": 0.8095238095238095,
+    "seconds": 41.2
+  },
+  "regressed": [],
+  "knowledge": [
+    {
+      "質問": "船内の重力は地球と同じですか",
+      "FAQ にある": false,
+      "学習前の分類": "asserted",
+      "学習前の出力": "{\"answer\": \"否\", \"needs_review\": false}",
+      "学習後の分類": "needs_review",
+      "学習後の出力": "{\"answer\": \"この FAQ には記載がありません。運営に確認が必要です。\", \"needs_review\": true}"
+    },
+    {
+      "質問": "船長の名前は何ですか",
+      "FAQ にある": false,
+      "学習前の分類": "format_error",
+      "学習前の出力": "{\"answer\": \"船長の名前は記載されていません\"}",
+      "学習後の分類": "needs_review",
+      "学習後の出力": "{\"answer\": \"この FAQ には記載がありません。運営に確認が必要です。\", \"needs_review\": true}"
+    },
+    {
+      "質問": "帰りの便はありますか",
+      "FAQ にある": false,
+      "学習前の分類": "format_error",
+      "学習前の出力": "{\"answer\": \"確認が必要\"}",
+      "学習後の分類": "needs_review",
+      "学習後の出力": "{\"answer\": \"この FAQ には記載がありません。運営に確認が必要です。\", \"needs_review\": true}"
+    },
+    {
+      "質問": "目的地はどこ？",
+      "FAQ にある": true,
+      "学習前の分類": "format_error",
+      "学習前の出力": "{\"answer\": \"月面3丁目9番地\"}",
+      "学習後の分類": "asserted",
+      "学習後の出力": "{\"answer\": \"目的地は、月面3丁目9番地です。\", \"needs_review\": false}"
+    }
+  ],
+  "executed_training_myself": true
+}

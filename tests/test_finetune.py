@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.finetune import (
     append_ui_train_history,
+    apply_dataset_meta,
     build_faq_splits,
     builtin_faq_editor_rows,
     faq_example_to_editor_row,
@@ -15,9 +16,12 @@ from app.finetune import (
     create_lab,
     extract_last_loss,
     faq_example_to_messages,
+    filter_runs,
     get_vram_stats,
+    infer_homework_level,
     iter_glossary_sft_records,
     link_run_to_lab,
+    list_dataset_groups,
     list_labs,
     list_runs,
     list_sft_datasets,
@@ -27,6 +31,8 @@ from app.finetune import (
     load_run_eval,
     load_run_memo,
     make_dataset,
+    make_faq_dataset_meta,
+    make_jsonl_dataset_meta,
     make_run_id,
     read_ui_train_history,
     release_vram,
@@ -137,6 +143,63 @@ def test_compare_config_diffs() -> None:
     assert "lr" not in diffs
     # nested dict があっても TypeError にならない
     assert "gen" not in diffs
+
+
+def test_dataset_meta_fingerprint_and_filter(tmp_path: Path) -> None:
+    train, valid, test, gold = build_faq_splits()
+    meta_a = make_faq_dataset_meta(
+        dataset_id="builtin_faq", faq={"k": "v"}, train=train, valid=valid, test=test, gold=gold
+    )
+    meta_b = make_faq_dataset_meta(
+        dataset_id="builtin_faq",
+        faq={"k": "changed"},
+        train=train,
+        valid=valid,
+        test=test,
+        gold=gold,
+    )
+    assert meta_a["dataset"] == "builtin_faq"
+    assert meta_a["dataset_n"] == 14
+    assert meta_a["dataset_fingerprint"] != meta_b["dataset_fingerprint"]
+
+    cfg = apply_dataset_meta({"lora_r": 16}, meta_a)
+    assert cfg["dataset_fingerprint"] == meta_a["dataset_fingerprint"]
+
+    jsonl = tmp_path / "custom.jsonl"
+    records = [{"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]}]
+    jsonl.write_text(json.dumps(records[0], ensure_ascii=False) + "\n", encoding="utf-8")
+    jmeta = make_jsonl_dataset_meta(jsonl, records)
+    assert jmeta["dataset"] == "custom"
+    assert "dataset_path" in jmeta
+    assert "dataset_path" not in build_result(config=jmeta, before={}, after={}, run_id="x", run_note="x")["config"]
+
+    a = build_result(
+        config=apply_dataset_meta({"lora_r": 16}, meta_a),
+        before={},
+        after={"format_rate": 1.0, "content_rate": 0.9},
+        run_id="run_a",
+        run_note="a",
+    )
+    b = build_result(
+        config=apply_dataset_meta({"lora_r": 8}, meta_b),
+        before={},
+        after={"format_rate": 1.0, "content_rate": 0.5},
+        run_id="run_b",
+        run_note="b",
+    )
+    rows = [run_summary_row(a), run_summary_row(b)]
+    assert filter_runs(rows, dataset="builtin_faq") == rows
+    assert len(filter_runs(rows, fingerprint=meta_a["dataset_fingerprint"])) == 1
+    assert infer_homework_level({"dataset": "builtin_faq"}) == "基礎"
+    assert infer_homework_level({"dataset": "glossary_sft"}) == "発展"
+    assert infer_homework_level({"dataset": "my_faq", "homework_level": "実装"}) == "実装"
+    assert len(filter_runs(rows, homework_level="基礎")) == 2
+    groups = list_dataset_groups(rows)
+    assert len(groups) == 2
+    assert {g["dataset_fingerprint"] for g in groups} == {
+        meta_a["dataset_fingerprint"],
+        meta_b["dataset_fingerprint"],
+    }
 
 
 def test_faq_splits_and_messages() -> None:

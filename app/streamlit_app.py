@@ -10,10 +10,10 @@ CLI・依存: docs/usage/finetune.md
 学習タブは finetune group + CUDA torch が必要（片方だけ sync しない）。
 
 構成:
-    main() が各 render_*_tab() を呼ぶ。データ操作は app.finetune（ft）側の関数を
-    呼ぶだけに寄せ、このファイルは UI 描画に専念する。一覧系の読み込みは
-    @st.cache_data でキャッシュし、書き込み操作のあとに _refresh_caches() で
-    失効させる。
+    main() がヘッダー（基礎 / 実装 / 発展）を切り替え、レベルごとの
+    render_level_workspace() → render_*_tab(level) を呼ぶ。
+    データ操作は app.finetune（ft）側の関数を呼ぶだけに寄せる。
+    widget / session_state キーはレベル slug で分離する。
 """
 
 from __future__ import annotations
@@ -63,6 +63,99 @@ DEFAULT_HP_ROWS = [
     {"run_note": "lr=1e-4", "lora_r": 16, "lr": 1e-4, "num_train_epochs": 20, "seed": 42},
     {"run_note": "epochs=10", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 10, "seed": 42},
 ]
+
+# 宿題レベルごとの既定（データセット作成・学習・比較の切り替え用）
+HOMEWORK_LEVELS: dict[str, dict[str, Any]] = {
+    "基礎": {
+        "slug": "kiso",
+        "answer": _REPO_ROOT / "lectures" / "02" / "answer_kiso.md",
+        "work_dir": Path("notebooks") / "qlora_lab_kiso",
+        "default_lab_id": "lec02-kiso",
+        "default_dataset": "[既定 FAQ・評価あり]",
+        "hp_rows": [
+            {"run_note": "baseline", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 20, "seed": 42},
+            {"run_note": "lora_r=8", "lora_r": 8, "lr": 2e-4, "num_train_epochs": 20, "seed": 42},
+            {"run_note": "lr=1e-4", "lora_r": 16, "lr": 1e-4, "num_train_epochs": 20, "seed": 42},
+            {"run_note": "epochs=10", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 10, "seed": 42},
+        ],
+        "hint": (
+            "基礎: 既定 FAQ のまま HP（lora_r / lr / epochs）を1つ変えて再学習し、"
+            "format_rate / content_rate / loss / 学習時間を baseline と比較する。"
+        ),
+        "dataset_blurb": "既定 FAQ を確認し、必要なら faq_train.jsonl を書き出します（評価は学習タブで自動）。",
+    },
+    "実装": {
+        "slug": "jissou",
+        "answer": _REPO_ROOT / "lectures" / "02" / "answer_jissou.md",
+        "work_dir": Path("notebooks") / "qlora_lab_jissou",
+        "default_lab_id": "lec02-jissou",
+        "default_dataset": "my_faq.jsonl",
+        "hp_rows": [
+            {"run_note": "jissou_baseline", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 20, "seed": 42},
+            {"run_note": "lr=1e-4", "lora_r": 16, "lr": 1e-4, "num_train_epochs": 20, "seed": 42},
+            {"run_note": "epochs=40", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 40, "seed": 42},
+        ],
+        "hint": (
+            "実装: FAQ / 質問を自分の題材に差し替えて JSONL を作り、学習前後を比べる。"
+            "根拠なし質問の用意も記録する。"
+        ),
+        "dataset_blurb": "独自 FAQ を編集して messages JSONL を保存します。用語集データは発展タブへ。",
+    },
+    "発展": {
+        "slug": "hattatsu",
+        "answer": _REPO_ROOT / "lectures" / "02" / "answer.md",
+        "work_dir": Path("notebooks") / "qlora_lab_hattatsu",
+        "default_lab_id": "lec02-hattatsu",
+        "default_dataset": "glossary_sft.jsonl",
+        "hp_rows": [
+            {"run_note": "glossary_sft", "lora_r": 16, "lr": 2e-4, "num_train_epochs": 20, "seed": 42},
+        ],
+        "hint": (
+            "発展: 用語集から Q&A JSONL を作り学習する。"
+            "評価は data/sft/glossary_eval.json の自作質問で、検索 vs 学習も考察する。"
+        ),
+        "dataset_blurb": "glossary → JSONL 生成と自作評価セットをこのレベルで扱います。",
+        "eval_path": _REPO_ROOT / "data" / "sft" / "glossary_eval.json",
+    },
+}
+
+
+def _level_key(level: str, name: str) -> str:
+    """レベルごとに Streamlit widget / session_state キーを分離する。"""
+    slug = HOMEWORK_LEVELS[level]["slug"]
+    return f"{slug}__{name}"
+
+
+def _dataset_name_for_level(name: str, level: str) -> bool:
+    """既存 JSONL を宿題レベル向けに見せ分ける。"""
+    n = name.lower()
+    if level == "基礎":
+        return n.startswith("faq")
+    if level == "発展":
+        return "glossary" in n
+    return "glossary" not in n
+
+
+def _filter_datasets_for_level(rows: list[dict[str, Any]], level: str) -> list[dict[str, Any]]:
+    return [r for r in rows if _dataset_name_for_level(str(r.get("name") or ""), level)]
+
+
+def _filter_runs_for_level(rows: list[dict[str, Any]], level: str) -> list[dict[str, Any]]:
+    return ft.filter_runs(rows, homework_level=level)
+
+
+def _filter_labs_for_level(labs: list[dict[str, Any]], level: str) -> list[dict[str, Any]]:
+    """lab_id にレベル slug / 既定 ID が含まれるものを優先表示（無ければ全部）。"""
+    slug = HOMEWORK_LEVELS[level]["slug"]
+    default_id = str(HOMEWORK_LEVELS[level]["default_lab_id"])
+    matched = [
+        lab
+        for lab in labs
+        if slug in str(lab.get("lab_id") or "")
+        or str(lab.get("lab_id") or "") == default_id
+        or level in str(lab.get("title") or "")
+    ]
+    return matched if matched else labs
 
 
 # ---------------------------------------------------------------------------
@@ -221,30 +314,35 @@ def render_vram_sidebar() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_dataset_memo_section(ds_rows: list[dict[str, Any]]) -> None:
+def _render_dataset_memo_section(ds_rows: list[dict[str, Any]], *, level: str) -> None:
     """既存データセット 1 件ごとのメモを選択・編集・保存する。"""
     if not ds_rows:
         return
     st.markdown("#### データセットごとのメモ")
     ds_options = [f"{r['name']} ({r['n']}件)" for r in ds_rows]
-    ds_choice = st.selectbox("メモを書くデータセット", ds_options, key="ds_for_memo")
+    ds_choice = st.selectbox(
+        "メモを書くデータセット", ds_options, key=_level_key(level, "ds_for_memo")
+    )
     name = ds_choice.split(" (", 1)[0]
     cur_memo = ft.load_dataset_memo(name)
 
-    # データセット選択が変わったらメモ本文を読み直す
-    if st.session_state.get("ds_memo_name") != name:
-        st.session_state["ds_memo_name"] = name
-        st.session_state["ds_memo_text"] = str(cur_memo.get("memo") or "")
+    name_state = _level_key(level, "ds_memo_name")
+    text_state = _level_key(level, "ds_memo_text")
+    if st.session_state.get(name_state) != name:
+        st.session_state[name_state] = name
+        st.session_state[text_state] = str(cur_memo.get("memo") or "")
 
-    author = st.text_input("記録者名", value="", key="ds_memo_author", placeholder="例: tanaka")
+    author = st.text_input(
+        "記録者名", value="", key=_level_key(level, "ds_memo_author"), placeholder="例: tanaka"
+    )
     st.text_area(
         f"メモ: {name}",
         height=160,
-        key="ds_memo_text",
+        key=text_state,
         placeholder="生成元・件数の内訳・品質メモ・次に直したいことなど",
     )
-    if st.button("データセットメモを保存", key="save_ds_memo_btn"):
-        ft.save_dataset_memo(name, st.session_state["ds_memo_text"], author=author)
+    if st.button("データセットメモを保存", key=_level_key(level, "save_ds_memo_btn")):
+        ft.save_dataset_memo(name, st.session_state[text_state], author=author)
         _refresh_caches()
         st.success("データセットメモを保存しました。")
         st.rerun()
@@ -253,29 +351,29 @@ def _render_dataset_memo_section(ds_rows: list[dict[str, Any]]) -> None:
     )
 
 
-def _render_common_memo_section() -> None:
+def _render_common_memo_section(*, level: str) -> None:
     """共通メモ（④ メモタブと同じ common_memo.json）を ① からも読み書きできるようにする。"""
     common_memo = ft.load_common_memo()
-    # common_memo.json が変わっていたら（④ での保存・外部編集など）両タブの本文を読み直す。
-    # updated_at は秒精度なので、同一秒内の保存にも追従できるよう中身ベースで判定する
     ver = json.dumps(common_memo, ensure_ascii=False, sort_keys=True)
-    if st.session_state.get("common_memo_ver") != ver:
-        st.session_state["common_memo_ver"] = ver
+    ver_key = _level_key(level, "common_memo_ver")
+    ds_text_key = _level_key(level, "common_memo_text_ds")
+    if st.session_state.get(ver_key) != ver:
+        st.session_state[ver_key] = ver
         body = str(common_memo.get("memo") or "")
         st.session_state["common_memo_text"] = body
-        st.session_state["common_memo_text_ds"] = body
+        st.session_state[ds_text_key] = body
 
     st.markdown("#### 共通メモ（アイデア・雑記）")
     st.text_area(
         "共通メモ本文",
         height=160,
-        key="common_memo_text_ds",
+        key=ds_text_key,
         placeholder="データセットのアイデア・やりたいこと・気づきなど。④ メモタブと共通",
     )
-    if st.button("共通メモを保存", key="save_common_ds"):
+    if st.button("共通メモを保存", key=_level_key(level, "save_common_ds")):
         saved = ft.save_common_memo(
-            st.session_state["common_memo_text_ds"],
-            author=st.session_state.get("ds_memo_author", ""),
+            st.session_state[ds_text_key],
+            author=st.session_state.get(_level_key(level, "ds_memo_author"), ""),
         )
         st.success(f"保存しました（更新: {saved.get('updated_at')}）。履歴は ④ メモタブで見られます。")
         st.rerun()
@@ -292,25 +390,15 @@ def _faq_rows_summary(rows: list[dict[str, Any]]) -> str:
     return f"{n} 件（needs_review=true: {n_review} / false: {n - n_review}）"
 
 
-def render_dataset_tab() -> None:
-    st.subheader("独自 FAQ / Q&A から messages JSONL を作る")
-    st.write(
-        "質問・回答・`needs_review` を編集し、学習用の `messages` 形式 JSONL を保存します。"
-        " FAQ 本文も差し替え可能です（宿題「実装」向け）。"
-        " 上のベース（既定 FAQ）と見比べながら、下の表でオリジナルを作れます。"
-    )
-
-    # --- ベース（既定 FAQ） ---
+def _render_builtin_faq_browser(level: str) -> None:
+    """既定 FAQ の分割を眺める（基礎・実装のベース確認用）。"""
     st.markdown("#### ベースデータセット（既定 FAQ）")
-    st.caption(
-        "ノートブック / 学習タブの「既定 FAQ・評価あり」と同じ分割。"
-        " train が学習に使われる 14 件です。"
-    )
+    st.caption("ノートブックの「既定 FAQ・評価あり」と同じ分割。train が学習 14 件です。")
     base_split = st.radio(
         "表示する分割",
         options=["train", "valid", "test"],
         horizontal=True,
-        key="base_faq_split",
+        key=_level_key(level, "base_faq_split"),
         format_func=lambda s: {
             "train": "train（学習・14件）",
             "valid": "valid（7件）",
@@ -329,43 +417,44 @@ def render_dataset_tab() -> None:
             "needs_review": st.column_config.CheckboxColumn("needs_review"),
         },
     )
-    load_c1, load_c2 = st.columns(2)
-    with load_c1:
-        if st.button("表示中の分割をエディタへ読み込む", key="load_base_split"):
-            st.session_state.custom_editor_df = pd.DataFrame(base_rows)
-            st.success(f"ベース {base_split}（{len(base_rows)} 件）をエディタに読み込みました。")
-            st.rerun()
-    with load_c2:
-        if st.button("train 14 件をエディタへ読み込む", key="load_base_train"):
-            train_rows = ft.builtin_faq_editor_rows("train")
-            st.session_state.custom_editor_df = pd.DataFrame(train_rows)
-            st.success(f"ベース train（{len(train_rows)} 件）をエディタに読み込みました。")
-            st.rerun()
 
-    st.divider()
-    st.markdown("#### オリジナル（編集）")
 
+def _render_custom_faq_editor(level: str) -> None:
+    """実装向け: 独自 FAQ エディタ。"""
+    editor_state_key = _level_key(level, "custom_editor_df")
+    st.markdown("#### オリジナル FAQ（編集）")
     col_name, col_out = st.columns(2)
     with col_name:
-        ds_name = st.text_input("データセット名", value="my_faq", key="ds_name")
+        ds_name = st.text_input("データセット名", value="my_faq", key=_level_key(level, "ds_name"))
     with col_out:
         out_path = st.text_input(
             "出力パス",
             value=str(ft.SFT_DIR / f"{_safe_dataset_name(ds_name)}.jsonl"),
-            key="custom_out",
+            key=_level_key(level, "custom_out"),
         )
 
     faq_body = st.text_area(
         "FAQ 本文（学習プロンプトに埋め込まれる）",
         value=ft.FAQ_TEXT,
         height=140,
-        key="faq_body",
+        key=_level_key(level, "faq_body"),
     )
 
-    if "custom_editor_df" not in st.session_state:
-        st.session_state.custom_editor_df = pd.DataFrame(DEFAULT_EDITOR_ROWS)
+    load_c1, load_c2 = st.columns(2)
+    with load_c1:
+        if st.button("ベース表示中の分割をエディタへ", key=_level_key(level, "load_base_split")):
+            split = st.session_state.get(_level_key(level, "base_faq_split"), "train")
+            st.session_state[editor_state_key] = pd.DataFrame(ft.builtin_faq_editor_rows(str(split)))
+            st.rerun()
+    with load_c2:
+        if st.button("train 14 件をエディタへ", key=_level_key(level, "load_base_train")):
+            st.session_state[editor_state_key] = pd.DataFrame(ft.builtin_faq_editor_rows("train"))
+            st.rerun()
 
-    custom_rows = st.session_state.custom_editor_df.fillna("").to_dict(orient="records")
+    if editor_state_key not in st.session_state:
+        st.session_state[editor_state_key] = pd.DataFrame(DEFAULT_EDITOR_ROWS)
+
+    custom_rows = st.session_state[editor_state_key].fillna("").to_dict(orient="records")
     custom_rows = [r for r in custom_rows if str(r.get("question", "")).strip()]
     st.caption(
         f"編集中: {_faq_rows_summary(custom_rows)} ／ ベース train: "
@@ -373,7 +462,7 @@ def render_dataset_tab() -> None:
     )
 
     edited = st.data_editor(
-        st.session_state.custom_editor_df,
+        st.session_state[editor_state_key],
         num_rows="dynamic",
         width="stretch",
         column_config={
@@ -381,24 +470,24 @@ def render_dataset_tab() -> None:
             "answer": st.column_config.TextColumn("answer", required=True, width="large"),
             "needs_review": st.column_config.CheckboxColumn("needs_review", default=False),
         },
-        key="custom_editor",
+        key=_level_key(level, "custom_editor"),
     )
-    st.session_state.custom_editor_df = edited
+    st.session_state[editor_state_key] = edited
 
     with st.expander("system プロンプト（参考・保存時は既定 SYSTEM を使用）"):
         st.code(ft.SYSTEM)
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("JSONL を保存", type="primary", key="save_custom"):
+        if st.button("JSONL を保存", type="primary", key=_level_key(level, "save_custom")):
             rows = edited.fillna("").to_dict(orient="records")
             path = ft.faq_editor_rows_to_jsonl(rows, Path(out_path), faq_text=faq_body)
             n = len(ft.read_jsonl(path))
             st.success(f"{n} 件 → {path.resolve()}")
-            st.session_state["last_saved_dataset"] = str(path.resolve())
+            st.session_state[_level_key(level, "last_saved_dataset")] = str(path.resolve())
             _refresh_caches()
     with c2:
-        if st.button("プレビュー（先頭2件）", key="preview_custom"):
+        if st.button("プレビュー（先頭2件）", key=_level_key(level, "preview_custom")):
             rows = edited.fillna("").to_dict(orient="records")
             previews = []
             for row in rows[:2]:
@@ -414,38 +503,89 @@ def render_dataset_tab() -> None:
                 previews.append(ft.faq_example_to_messages(ex))
             st.json(previews)
     with c3:
-        uploaded = st.file_uploader("既存 JSONL を取り込む", type=["jsonl", "json"], key="upload_jsonl")
-        if uploaded is not None and st.button("アップロードを data/sft に保存", key="save_upload"):
+        uploaded = st.file_uploader(
+            "既存 JSONL を取り込む", type=["jsonl", "json"], key=_level_key(level, "upload_jsonl")
+        )
+        if uploaded is not None and st.button(
+            "アップロードを data/sft に保存", key=_level_key(level, "save_upload")
+        ):
             dest = ft.SFT_DIR / uploaded.name
             ft.SFT_DIR.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(uploaded.getvalue())
             st.success(f"保存: {dest.resolve()}（{len(ft.read_jsonl(dest))} 件）")
             _refresh_caches()
 
-    st.divider()
-    st.subheader("既存データセット")
-    ds_rows = _cached_list_sft_datasets()
-    if ds_rows:
-        st.dataframe(pd.DataFrame(ds_rows), width="stretch")
-    else:
-        st.info("`data/sft/` に JSONL がありません。")
 
-    _render_dataset_memo_section(ds_rows)
+def _render_glossary_dataset_tools(level: str) -> None:
+    """発展向け: 用語集 JSONL と自作評価の確認。"""
+    st.markdown("#### 用語集 → SFT JSONL")
+    g_out = st.text_input(
+        "glossary 出力",
+        value=str(ft.SFT_DIR / "glossary_sft.jsonl"),
+        key=_level_key(level, "g_out"),
+    )
+    if st.button("glossary → JSONL を生成", type="primary", key=_level_key(level, "gen_glossary")):
+        path = ft.make_dataset("glossary", Path(g_out))
+        st.success(f"{len(ft.read_jsonl(path))} 件 → {path.resolve()}")
+        st.session_state[_level_key(level, "last_saved_dataset")] = str(path.resolve())
+        _refresh_caches()
 
-    _render_common_memo_section()
-
-    with st.expander("用語集 / 既定 FAQ から生成"):
-        g_out = st.text_input(
-            "glossary 出力", value=str(ft.SFT_DIR / "glossary_sft.jsonl"), key="g_out"
+    eval_path = Path(HOMEWORK_LEVELS[level].get("eval_path") or (ft.SFT_DIR / "glossary_eval.json"))
+    st.markdown("#### 自作評価セット")
+    st.caption(f"`{eval_path.relative_to(_REPO_ROOT).as_posix()}`（学習前後で同じ質問を使う）")
+    if eval_path.is_file():
+        payload = json.loads(eval_path.read_text(encoding="utf-8"))
+        items = payload.get("items") or []
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "id": it.get("id"),
+                        "kind": it.get("kind"),
+                        "question": it.get("question"),
+                        "must_include": ", ".join(it.get("must_include") or []),
+                        "needs_review": it.get("needs_review"),
+                    }
+                    for it in items
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
         )
-        if st.button("glossary → JSONL", key="gen_glossary"):
-            path = ft.make_dataset("glossary", Path(g_out))
-            st.success(f"{len(ft.read_jsonl(path))} 件 → {path.resolve()}")
-            _refresh_caches()
-        if st.button("既定 FAQ 14 件 → JSONL", key="gen_faq"):
+    else:
+        st.warning("glossary_eval.json がありません。先に自作評価を用意してください。")
+
+
+def render_dataset_tab(level: str) -> None:
+    profile = HOMEWORK_LEVELS[level]
+    st.subheader(f"① データセット作成（{level}）")
+    st.write(profile["dataset_blurb"])
+
+    if level == "基礎":
+        _render_builtin_faq_browser(level)
+        st.divider()
+        if st.button("既定 FAQ 14 件 → faq_train.jsonl", key=_level_key(level, "gen_faq")):
             path = ft.make_dataset("faq", ft.SFT_DIR / "faq_train.jsonl")
             st.success(f"{len(ft.read_jsonl(path))} 件 → {path.resolve()}")
             _refresh_caches()
+        st.caption("学習は ② で「既定 FAQ・評価あり」を選ぶのが基本です（JSONL 化は任意）。")
+    elif level == "実装":
+        _render_builtin_faq_browser(level)
+        st.divider()
+        _render_custom_faq_editor(level)
+    else:
+        _render_glossary_dataset_tools(level)
+
+    st.divider()
+    st.subheader("このレベル向けの既存データセット")
+    ds_rows = _filter_datasets_for_level(_cached_list_sft_datasets(), level)
+    if ds_rows:
+        st.dataframe(pd.DataFrame(ds_rows), width="stretch")
+    else:
+        st.info("このレベル向けの JSONL はまだありません。")
+
+    _render_dataset_memo_section(ds_rows, level=level)
+    _render_common_memo_section(level=level)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +602,7 @@ def _run_queue(
     lab_id: str | None,
     author: str,
     run_memo: str,
+    homework_level: str,
 ) -> None:
     """キューを上から順に学習し、全体進捗バーとログを表示する。"""
     batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -474,6 +615,7 @@ def _run_queue(
             "skip_eval": bool(skip_eval or train_jsonl),
             "lab_id": lab_id,
             "author": author,
+            "homework_level": homework_level,
             "queue": queue,
         }
     )
@@ -484,7 +626,6 @@ def _run_queue(
     log_box = st.empty()
     logs: list[str] = []
     results_ok: list[str] = []
-    # 単一 run 内の進捗は全体バーの現在スロット内で上書きしない（slot で管理）
     slot = {"base": 0.0, "span": 1.0, "label": ""}
 
     def _on_progress(ev: dict[str, Any]) -> None:
@@ -510,6 +651,7 @@ def _run_queue(
 
         cfg = _row_to_config(row)
         cfg["run_note"] = note
+        cfg["homework_level"] = homework_level
 
         try:
             result = ft.train_lora(
@@ -543,63 +685,93 @@ def _run_queue(
     else:
         overall.progress(1.0, text="キュー完了")
         status.success(f"完了 {len(results_ok)} 件: {', '.join(results_ok)}")
-        st.session_state["last_compare_ids"] = results_ok
+        st.session_state[_level_key(homework_level, "last_compare_ids")] = results_ok
     _refresh_caches()
 
 
-def render_train_tab() -> None:
-    st.subheader("学習キュー（パラメータを複数行）")
+def render_train_tab(level: str) -> None:
+    profile = HOMEWORK_LEVELS[level]
+    hp_state_key = _level_key(level, "hp_queue_df")
+    st.subheader(f"② 学習（{level}）")
     st.write(
         "各行が1実験です。上から順に学習し、進捗バーとログを更新します。"
         " 既定 FAQ を選ぶと学習前後の format/content 評価も入ります。"
         " オリジナル JSONL の場合は評価をスキップし、loss・学習時間を記録します。"
     )
+    if level == "基礎":
+        st.caption("基礎では「既定 FAQ・評価あり」＋ HP 1 変更が基本です。")
+    elif level == "実装":
+        st.caption("実装では ① で作った独自 FAQ JSONL を選んで学習します。")
+    else:
+        st.caption("発展では glossary_sft.jsonl を選び、評価は自作セットで別途記録します。")
 
     work_dir = st.text_input(
         "work_dir（チェックポイント等）",
-        value=str(DEFAULT_WORK_DIR),
-        key="train_work_dir",
+        value=str(profile["work_dir"]),
+        key=_level_key(level, "train_work_dir"),
     )
     work_path = Path(work_dir) if work_dir.strip() else None
 
-    ds_options = ["[既定 FAQ・評価あり]"] + [
-        f"{r['name']} ({r['n']}件)" for r in _cached_list_sft_datasets()
-    ]
-    ds_choice = st.selectbox("学習データ", ds_options, key="train_ds_choice")
+    level_ds = _filter_datasets_for_level(_cached_list_sft_datasets(), level)
+    if level == "基礎":
+        ds_options = ["[既定 FAQ・評価あり]"] + [f"{r['name']} ({r['n']}件)" for r in level_ds]
+    elif level == "発展":
+        ds_options = [f"{r['name']} ({r['n']}件)" for r in level_ds] or [
+            f"{profile['default_dataset']}（未生成）"
+        ]
+    else:
+        ds_options = [f"{r['name']} ({r['n']}件)" for r in level_ds]
+        ds_options = ["[既定 FAQ・評価あり]"] + ds_options
+
+    default_ds = str(profile["default_dataset"])
+    default_idx = 0
+    for i, opt in enumerate(ds_options):
+        if default_ds in opt or (default_ds == "[既定 FAQ・評価あり]" and i == 0):
+            default_idx = i
+            break
+
+    ds_choice = st.selectbox(
+        "学習データ",
+        ds_options,
+        index=min(default_idx, max(0, len(ds_options) - 1)),
+        key=_level_key(level, "train_ds_choice"),
+    )
     train_jsonl: Path | None = None
-    if ds_choice != "[既定 FAQ・評価あり]":
-        # name は "foo.jsonl (N件)" 形式
+    if ds_choice != "[既定 FAQ・評価あり]" and "未生成" not in ds_choice:
         name = ds_choice.split(" (", 1)[0]
         train_jsonl = ft.SFT_DIR / name
 
     skip_eval = st.checkbox(
         "評価をスキップ（高速・デバッグ用。カスタム JSONL では自動スキップ）",
-        value=False,
-        key="skip_eval",
+        value=(level == "発展"),
+        key=_level_key(level, "skip_eval"),
     )
 
-    labs = _cached_list_labs()
+    labs = _filter_labs_for_level(_cached_list_labs(), level)
     lab_choices = ["（なし）"] + [str(x["lab_id"]) for x in labs]
+    default_lab = str(profile["default_lab_id"])
+    lab_index = lab_choices.index(default_lab) if default_lab in lab_choices else 0
     train_lab = st.selectbox(
         "紐づける実験 ID（lab）",
         lab_choices,
-        key="train_lab_id",
+        index=lab_index,
+        key=_level_key(level, "train_lab_id"),
         help="④ で作成した実験 ID。共同メモの単位になります。",
     )
-    train_author = st.text_input("記録者名（メモ用）", value="", key="train_author")
+    train_author = st.text_input("記録者名（メモ用）", value="", key=_level_key(level, "train_author"))
     train_run_memo = st.text_area(
         "このキュー共通の run メモ（各実験に同じ文面を付ける）",
         value="",
         height=80,
-        key="train_run_memo",
-        placeholder="例: lr sweep / FAQ 既定データ / 期待: epochs で loss が下がる",
+        key=_level_key(level, "train_run_memo"),
+        placeholder=f"例: {level} / dataset={default_ds}",
     )
 
-    if "hp_queue_df" not in st.session_state:
-        st.session_state.hp_queue_df = pd.DataFrame(DEFAULT_HP_ROWS)
+    if hp_state_key not in st.session_state:
+        st.session_state[hp_state_key] = pd.DataFrame(profile["hp_rows"])
 
     hp_edited = st.data_editor(
-        st.session_state.hp_queue_df,
+        st.session_state[hp_state_key],
         num_rows="dynamic",
         width="stretch",
         column_config={
@@ -609,18 +781,18 @@ def render_train_tab() -> None:
             "num_train_epochs": st.column_config.NumberColumn("epochs", min_value=1, max_value=100, step=1),
             "seed": st.column_config.NumberColumn("seed", min_value=0, step=1),
         },
-        key="hp_editor",
+        key=_level_key(level, "hp_editor"),
     )
-    st.session_state.hp_queue_df = hp_edited
+    st.session_state[hp_state_key] = hp_edited
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2, _b3 = st.columns(3)
     with b1:
-        if st.button("既定4行に戻す", key="reset_hp"):
-            st.session_state.hp_queue_df = pd.DataFrame(DEFAULT_HP_ROWS)
+        if st.button("このレベルの既定キューに戻す", key=_level_key(level, "reset_hp")):
+            st.session_state[hp_state_key] = pd.DataFrame(profile["hp_rows"])
             st.rerun()
     with b2:
-        if st.button("過去 run から1行追加", key="add_from_past"):
-            past = _cached_list_runs(work_path)
+        if st.button("過去 run から1行追加", key=_level_key(level, "add_from_past")):
+            past = _filter_runs_for_level(_cached_list_runs(work_path), level)
             if past:
                 latest = past[-1]
                 base = _row_to_config(latest)
@@ -631,27 +803,54 @@ def render_train_tab() -> None:
                     "num_train_epochs": base["num_train_epochs"],
                     "seed": base["seed"],
                 }
-                st.session_state.hp_queue_df = pd.concat(
-                    [st.session_state.hp_queue_df, pd.DataFrame([row])],
+                st.session_state[hp_state_key] = pd.concat(
+                    [st.session_state[hp_state_key], pd.DataFrame([row])],
                     ignore_index=True,
                 )
                 st.rerun()
             else:
-                st.warning("過去の run がありません。")
+                st.warning("このレベルの過去 run がありません。")
 
     st.divider()
-    st.subheader("過去の学習設定")
-    hist = _cached_read_ui_train_history(limit=30)
-    past_runs = _cached_list_runs(work_path)
+    st.subheader("過去の学習設定（このレベル）")
+    hist = [
+        h
+        for h in _cached_read_ui_train_history(limit=50)
+        if str(h.get("homework_level") or "") in ("", level)
+        and (
+            not h.get("homework_level")
+            or h.get("homework_level") == level
+        )
+    ]
+    # 古い履歴（homework_level 無し）は dataset 名でざっくり絞る
+    if level == "発展":
+        hist = [h for h in hist if "glossary" in str(h.get("dataset") or "").lower() or h.get("homework_level") == level]
+    elif level == "基礎":
+        hist = [
+            h
+            for h in hist
+            if str(h.get("dataset") or "") in ("builtin_faq",) or "faq" in str(h.get("dataset") or "").lower() or h.get("homework_level") == level
+        ]
+    else:
+        hist = [
+            h
+            for h in hist
+            if h.get("homework_level") == level
+            or (
+                "glossary" not in str(h.get("dataset") or "").lower()
+                and str(h.get("dataset") or "") not in ("builtin_faq",)
+            )
+        ]
+    past_runs = _filter_runs_for_level(_cached_list_runs(work_path), level)
     hcol1, hcol2 = st.columns(2)
     with hcol1:
         st.caption("UI から起動した学習キュー履歴")
         if hist:
-            st.dataframe(pd.DataFrame(hist), width="stretch", height=220)
+            st.dataframe(pd.DataFrame(hist[:30]), width="stretch", height=220)
         else:
-            st.info("まだ UI 学習履歴がありません。")
+            st.info("このレベルの UI 学習履歴はまだありません。")
     with hcol2:
-        st.caption("保存済み実験（outputs/finetune）")
+        st.caption("保存済み実験（このレベル）")
         if past_runs:
             st.dataframe(
                 _prefer_columns(
@@ -660,6 +859,7 @@ def render_train_tab() -> None:
                         "run_id",
                         "lab_id",
                         "run_note",
+                        "homework_level",
                         "memo_preview",
                         "lora_r",
                         "lr",
@@ -674,11 +874,14 @@ def render_train_tab() -> None:
                 height=220,
             )
         else:
-            st.info("実験結果がありません。")
+            st.info("このレベルの実験結果はまだありません。")
 
     st.divider()
-    start = st.button("キューを上から学習開始", type="primary", key="start_train")
+    start = st.button("キューを上から学習開始", type="primary", key=_level_key(level, "start_train"))
     if start:
+        if level == "発展" and train_jsonl is None:
+            st.error("発展では glossary JSONL を先に ① で生成してから選んでください。")
+            return
         queue = hp_edited.dropna(how="all").to_dict(orient="records")
         queue = [r for r in queue if str(r.get("run_note", "")).strip()]
         if not queue:
@@ -693,6 +896,7 @@ def render_train_tab() -> None:
                 lab_id=lab_for_train,
                 author=train_author,
                 run_memo=train_run_memo,
+                homework_level=level,
             )
 
 
@@ -701,29 +905,71 @@ def render_train_tab() -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_compare_tab() -> None:
-    st.subheader("実験結果の比較")
+def render_compare_tab(level: str) -> None:
+    profile = HOMEWORK_LEVELS[level]
+    st.subheader(f"③ 結果比較（{level}）")
     work_hint = st.text_input(
         "追加で読む WORK ディレクトリ（任意）",
-        value=str(DEFAULT_WORK_DIR),
-        key="compare_work",
+        value=str(profile["work_dir"]),
+        key=_level_key(level, "compare_work"),
     )
     work_dir_cmp = Path(work_hint) if work_hint.strip() else None
-    rows = _cached_list_runs(work_dir_cmp)
+    rows = _filter_runs_for_level(_cached_list_runs(work_dir_cmp), level)
 
     if not rows:
         st.info(
-            f"`{ft.FINETUNE_DIR}` に実験がありません。"
+            f"このレベル（{level}）の実験がありません。"
             "② の学習タブか `uv run python -m app.finetune train` で保存してください。"
+            " 古い run は dataset 名からレベル推定します。"
         )
         return
 
-    df = pd.DataFrame(rows)
+    groups = ft.list_dataset_groups(rows)
+    st.markdown("#### データセット別グループ")
+    st.caption(
+        "FAQ や JSONL の中身を変えると `dataset_fingerprint` が変わります。"
+        "率の比較は同じ fingerprint（同じデータ内容）同士で行うのが基本です。"
+    )
+    st.dataframe(pd.DataFrame(groups), width="stretch", hide_index=True)
+
+    ds_options = sorted({str(g.get("dataset") or "(unknown)") for g in groups})
+    ds_filter = st.selectbox(
+        "比較対象のデータセット",
+        options=["（すべて）", *ds_options],
+        key=_level_key(level, "compare_dataset_filter"),
+    )
+    fp_options = [
+        str(g.get("dataset_fingerprint") or "(none)")
+        for g in groups
+        if ds_filter == "（すべて）" or str(g.get("dataset")) == ds_filter
+    ]
+    fp_filter = st.selectbox(
+        "比較対象の fingerprint（データ内容）",
+        options=["（すべて）", *fp_options],
+        key=_level_key(level, "compare_fp_filter"),
+    )
+    filtered_rows = ft.filter_runs(
+        rows,
+        dataset=None if ds_filter == "（すべて）" else ds_filter,
+        fingerprint=None if fp_filter == "（すべて）" else fp_filter,
+        homework_level=level,
+    )
+    mixed = len(ft.list_dataset_groups(filtered_rows)) > 1
+    if mixed:
+        st.warning(
+            "複数データセット／fingerprint が混在しています。"
+            "上のフィルタで絞るか、混在比較は参考値として扱ってください。"
+        )
+
+    df = pd.DataFrame(filtered_rows)
     df = _prefer_columns(
         df,
         (
             "run_id",
             "run_note",
+            "dataset",
+            "dataset_fingerprint",
+            "dataset_n",
             "format_rate_before",
             "content_rate_before",
             "format_rate",
@@ -732,24 +978,30 @@ def render_compare_tab() -> None:
             "training_seconds",
             "lab_id",
             "memo_preview",
-            "dataset",
             "lora_r",
             "lr",
             "num_train_epochs",
         ),
     )
-    st.markdown("#### 全実験一覧")
+    st.markdown("#### 実験一覧（フィルタ後）")
     st.dataframe(df, width="stretch")
     # 一覧でも率がすぐ見えるよう、先頭に提出用の要約を出す
     all_rates = _rates_display_df(df)
     if not all_rates.empty:
-        with st.expander("format_rate / content_rate だけ表示（全実験）", expanded=True):
+        with st.expander("format_rate / content_rate だけ表示（フィルタ後）", expanded=True):
             st.dataframe(all_rates, width="stretch", hide_index=True)
 
-    run_ids = [str(r.get("run_id")) for r in rows if r.get("run_id")]
-    default_pick = st.session_state.get("last_compare_ids") or run_ids[-min(4, len(run_ids)) :]
+    run_ids = [str(r.get("run_id")) for r in filtered_rows if r.get("run_id")]
+    default_pick = st.session_state.get(_level_key(level, "last_compare_ids")) or run_ids[
+        -min(4, len(run_ids)) :
+    ]
     default_pick = [r for r in default_pick if r in run_ids] or run_ids[:2]
-    pick = st.multiselect("比較する run", run_ids, default=default_pick, key="compare_pick")
+    pick = st.multiselect(
+        "比較する run",
+        run_ids,
+        default=default_pick,
+        key=_level_key(level, "compare_pick"),
+    )
 
     if len(pick) >= 1:
         cmp_df = df[df["run_id"].isin(pick)].copy()
@@ -1451,8 +1703,9 @@ def _render_run_memo_editor(run_id: str, *, selected_lab: str, author: str) -> N
         )
 
 
-def render_memo_tab() -> None:
-    st.subheader("実験 ID（lab）とメモ")
+def render_memo_tab(level: str) -> None:
+    profile = HOMEWORK_LEVELS[level]
+    st.subheader(f"④ 実験ID・メモ（{level}）")
     st.write(
         "**共通メモ** は実験全体で共有する 1 枚メモ（履歴付き）、"
         " **実験 ID** は複数 run を束ねる単位です。"
@@ -1462,17 +1715,19 @@ def render_memo_tab() -> None:
         f"各 `run` の `memo.json` / `result.json`。"
     )
 
-    author = st.text_input("記録者名", value="", key="memo_author", placeholder="例: tanaka")
+    author = st.text_input(
+        "記録者名", value="", key=_level_key(level, "memo_author"), placeholder="例: tanaka"
+    )
 
     st.markdown("#### 共通メモ（全実験共通）")
     common_memo = ft.load_common_memo()
     common_text = st.text_area(
         "共通メモ本文",
         height=180,
-        key="common_memo_text",
+        key=_level_key(level, "common_memo_text"),
         placeholder="データ方針・評価の約束・今週の focus など、実験全体で共有する内容",
     )
-    if st.button("共通メモを保存", key="save_common"):
+    if st.button("共通メモを保存", key=_level_key(level, "save_common")):
         saved = ft.save_common_memo(common_text, author=author)
         st.success(f"保存しました（更新: {saved.get('updated_at')}）")
         _refresh_caches()
@@ -1489,23 +1744,31 @@ def render_memo_tab() -> None:
                 st.code(str(entry.get("memo") or ""), language=None)
 
     st.markdown("#### 実験 ID の作成・選択")
-    labs = _cached_list_labs()
+    labs = _filter_labs_for_level(_cached_list_labs(), level)
     c_new1, c_new2, c_new3 = st.columns([2, 2, 1])
     with c_new1:
-        new_lab_id = st.text_input("新しい実験 ID", value="lec02-hp-sweep", key="new_lab_id")
+        new_lab_id = st.text_input(
+            "新しい実験 ID",
+            value=str(profile["default_lab_id"]),
+            key=_level_key(level, "new_lab_id"),
+        )
     with c_new2:
-        new_lab_title = st.text_input("タイトル（任意）", value="", key="new_lab_title")
+        new_lab_title = st.text_input(
+            "タイトル（任意）",
+            value=f"第2回 {level}",
+            key=_level_key(level, "new_lab_title"),
+        )
     with c_new3:
         st.write("")
         st.write("")
-        if st.button("作成", type="primary", key="create_lab_btn"):
+        if st.button("作成", type="primary", key=_level_key(level, "create_lab_btn")):
             lab = ft.create_lab(
                 new_lab_id,
                 title=new_lab_title or new_lab_id,
                 author=author,
             )
             st.success(f"作成/取得: `{lab['lab_id']}`")
-            st.session_state["active_lab_id"] = lab["lab_id"]
+            st.session_state[_level_key(level, "active_lab_id")] = lab["lab_id"]
             _refresh_caches()
             st.rerun()
 
@@ -1515,19 +1778,20 @@ def render_memo_tab() -> None:
         st.info("まだ実験 ID がありません。上で作成してください。")
 
     lab_ids = [str(x["lab_id"]) for x in labs]
-    default_lab = st.session_state.get("active_lab_id")
+    default_lab = st.session_state.get(_level_key(level, "active_lab_id"))
+    preferred = str(profile["default_lab_id"])
     if default_lab not in lab_ids:
-        default_lab = lab_ids[0] if lab_ids else None
+        default_lab = preferred if preferred in lab_ids else (lab_ids[0] if lab_ids else None)
     selected_lab = st.selectbox(
         "編集する実験 ID",
         lab_ids if lab_ids else ["（未作成）"],
         index=lab_ids.index(default_lab) if default_lab in lab_ids else 0,
-        key="selected_lab",
+        key=_level_key(level, "selected_lab"),
     )
 
     if lab_ids and selected_lab in lab_ids:
         lab = ft.load_lab(selected_lab)
-        st.session_state["active_lab_id"] = selected_lab
+        st.session_state[_level_key(level, "active_lab_id")] = selected_lab
 
         # lab の切替・外部（③ の共同メモ保存 / CLI）での更新があったら本文を読み直す
         shared_ver = json.dumps(lab, ensure_ascii=False, sort_keys=True)
@@ -1631,6 +1895,50 @@ def render_memo_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 宿題レベル別ワークスペース / 入口
+# ---------------------------------------------------------------------------
+
+
+def render_homework_answer_view(level: str, *, expanded: bool = False) -> None:
+    """基礎 / 実装 / 発展ごとの answer 控えを表示する。"""
+    profile = HOMEWORK_LEVELS[level]
+    path = Path(profile["answer"])
+    st.markdown(f"表示ファイル: `{path.relative_to(_REPO_ROOT).as_posix()}`")
+    if not path.is_file():
+        st.warning(f"`{path.name}` がありません。先に解答メモを作成してください。")
+        return
+    text = path.read_text(encoding="utf-8")
+    with st.expander("このレベルの answer 控え", expanded=expanded):
+        st.markdown(text)
+    with st.expander("生テキスト（コピー用）", expanded=False):
+        st.code(text, language="markdown")
+
+
+def render_level_workspace(level: str) -> None:
+    """選択した宿題レベルでデータセット作成〜実験管理までを切り替える。"""
+    profile = HOMEWORK_LEVELS[level]
+    st.info(profile["hint"])
+    render_homework_answer_view(level, expanded=False)
+
+    tab_data, tab_train, tab_compare, tab_memo = st.tabs(
+        [
+            f"① データセット（{level}）",
+            f"② 学習（{level}）",
+            f"③ 結果比較（{level}）",
+            f"④ 実験ID・メモ（{level}）",
+        ]
+    )
+    with tab_data:
+        render_dataset_tab(level)
+    with tab_train:
+        render_train_tab(level)
+    with tab_compare:
+        render_compare_tab(level)
+    with tab_memo:
+        render_memo_tab(level)
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -1639,21 +1947,22 @@ def main() -> None:
     st.set_page_config(page_title="AIE2026 LoRA 実験", layout="wide")
     st.title("AIE2026 LoRA 実験管理")
     st.caption(
-        "データセット / 複数学習 / 結果比較 / 実験ID・メモ。"
+        "ヘッダーで宿題レベル（基礎 / 実装 / 発展）を切り替え、"
+        "レベルごとにデータセット作成・学習・比較・メモを分けて進めます。"
         " 学習には `uv sync --group ui --group finetune` と CUDA torch が必要です。"
     )
     render_vram_sidebar()
-    tab_data, tab_train, tab_compare, tab_memo = st.tabs(
-        ["① オリジナルデータセット", "② 学習（複数設定）", "③ 結果比較", "④ 実験ID・メモ"]
+
+    level = st.segmented_control(
+        "宿題レベル",
+        options=["基礎", "実装", "発展"],
+        default="発展",
+        key="homework_level_header",
+        help="レベルごとにデータセット候補・学習既定・実験一覧を切り替えます。",
     )
-    with tab_data:
-        render_dataset_tab()
-    with tab_train:
-        render_train_tab()
-    with tab_compare:
-        render_compare_tab()
-    with tab_memo:
-        render_memo_tab()
+    if level is None:
+        level = "発展"
+    render_level_workspace(level)
 
 
 main()

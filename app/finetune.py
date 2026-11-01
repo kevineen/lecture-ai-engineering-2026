@@ -7,7 +7,8 @@
 使い方（要約）:
     uv run python -m app.finetune make-dataset --source glossary -o data/sft/glossary_sft.jsonl
     uv run python -m app.finetune list
-    uv run python -m app.finetune compare
+    uv run python -m app.finetune list --group-by-dataset
+    uv run python -m app.finetune compare --dataset builtin_faq
     uv run python -m app.finetune train --note baseline
     uv run python -m app.finetune train --note custom --train-jsonl data/sft/my_faq.jsonl
     uv sync --group ui --group finetune
@@ -20,6 +21,7 @@ Colab ではリポジトリが無いことがあるので、ノートブック�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -118,7 +120,7 @@ SYSTEM = (
 GLOSSARY_TEMPLATES = ["「{term}」とは何ですか？", "{term}について簡単に説明してください。"]
 
 # result.json の config から除外するパス系キー
-_CONFIG_SKIP_KEYS = frozenset({"work_dir", "drive_dir", "memo"})
+_CONFIG_SKIP_KEYS = frozenset({"work_dir", "drive_dir", "memo", "dataset_path"})
 
 
 def _safe_slug(text: str) -> str:
@@ -149,6 +151,134 @@ def extract_last_loss(log_history: list[dict[str, Any]] | None) -> float | None:
 def public_config(config: dict[str, Any]) -> dict[str, Any]:
     """提出・比較用にパス系キーを除いた config を返す。"""
     return {k: v for k, v in config.items() if k not in _CONFIG_SKIP_KEYS}
+
+
+def fingerprint_json(obj: Any, *, length: int = 12) -> str:
+    """比較用に JSON 正規化した内容の短い SHA-256 指紋を返す。"""
+    raw = json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]
+
+
+def make_faq_dataset_meta(
+    *,
+    dataset_id: str,
+    faq: dict[str, str],
+    train: list[dict[str, Any]],
+    valid: list[dict[str, Any]] | None = None,
+    test: list[dict[str, Any]] | None = None,
+    gold: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """FAQ 分割データから result.config 用の dataset メタを作る。
+
+    同じ dataset_id でも FAQ / 分割の中身が変われば fingerprint が変わるので、
+    データ差し替え後の実験を別グループとして比較できる。
+    """
+    valid_list = list(valid or [])
+    test_list = list(test or [])
+    gold_map = dict(gold or {})
+    payload = {
+        "faq": faq,
+        "train": train,
+        "valid": valid_list,
+        "test": test_list,
+        "gold": gold_map,
+    }
+    return {
+        "dataset": dataset_id,
+        "dataset_n": len(train),
+        "dataset_fingerprint": fingerprint_json(payload),
+        "dataset_split": {
+            "train": len(train),
+            "valid": len(valid_list),
+            "test": len(test_list),
+        },
+    }
+
+
+def make_jsonl_dataset_meta(path: Path, records: list[dict[str, Any]]) -> dict[str, Any]:
+    """messages JSONL 学習用の dataset メタ。"""
+    p = Path(path)
+    return {
+        "dataset": p.stem,
+        "dataset_n": len(records),
+        "dataset_fingerprint": fingerprint_json(records),
+        "dataset_split": {"n": len(records)},
+        # public_config では落とす（マシン依存パス）
+        "dataset_path": str(p.resolve()),
+    }
+
+
+def apply_dataset_meta(config: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    """config に dataset / fingerprint などをマージして返す。"""
+    out = dict(config)
+    out.update(meta)
+    return out
+
+
+def infer_homework_level(row: dict[str, Any]) -> str:
+    """実験行から宿題レベル（基礎 / 実装 / 発展）を推定する。
+
+    `homework_level`（要約または config）を優先し、無ければ dataset 名で補う。
+    """
+    explicit = row.get("homework_level")
+    if explicit in ("基礎", "実装", "発展"):
+        return str(explicit)
+    cfg = row.get("config")
+    if isinstance(cfg, dict):
+        cfg_level = cfg.get("homework_level")
+        if cfg_level in ("基礎", "実装", "発展"):
+            return str(cfg_level)
+    ds = str(row.get("dataset") or "").lower()
+    if "glossary" in ds:
+        return "発展"
+    if ds in ("builtin_faq", "faq_train") or ds.startswith("faq"):
+        return "基礎"
+    if not ds or ds in ("(unknown)", "none"):
+        return "基礎"
+    return "実装"
+
+
+def filter_runs(
+    rows: list[dict[str, Any]],
+    *,
+    dataset: str | None = None,
+    fingerprint: str | None = None,
+    homework_level: str | None = None,
+) -> list[dict[str, Any]]:
+    """dataset / fingerprint / homework_level で実験行を絞る。"""
+    out = list(rows)
+    if dataset is not None:
+        out = [r for r in out if str(r.get("dataset") or "") == dataset]
+    if fingerprint is not None:
+        out = [r for r in out if str(r.get("dataset_fingerprint") or "") == fingerprint]
+    if homework_level is not None:
+        out = [r for r in out if infer_homework_level(r) == homework_level]
+    return out
+
+
+def list_dataset_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """dataset × fingerprint ごとの要約（比較の入口）。"""
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("dataset") or "(unknown)"), str(row.get("dataset_fingerprint") or "(none)"))
+        buckets.setdefault(key, []).append(row)
+
+    groups: list[dict[str, Any]] = []
+    for (ds, fp), items in sorted(buckets.items(), key=lambda x: (x[0][0], x[0][1])):
+        content_rates = [float(r["content_rate"]) for r in items if r.get("content_rate") is not None]
+        format_rates = [float(r["format_rate"]) for r in items if r.get("format_rate") is not None]
+        groups.append(
+            {
+                "dataset": ds,
+                "dataset_fingerprint": fp,
+                "n_runs": len(items),
+                "dataset_n": items[0].get("dataset_n"),
+                "best_format_rate": max(format_rates) if format_rates else None,
+                "best_content_rate": max(content_rates) if content_rates else None,
+                "run_ids": [r.get("run_id") for r in items],
+            }
+        )
+    return groups
 
 
 def build_result(
@@ -201,7 +331,7 @@ def run_summary_row(result: dict[str, Any]) -> dict[str, Any]:
     before = result.get("before") or {}
     after = result.get("after") or {}
     memo = str(result.get("memo") or "")
-    return {
+    summary = {
         "run_id": result.get("run_id"),
         "run_note": result.get("run_note"),
         "lab_id": result.get("lab_id") or cfg.get("lab_id"),
@@ -212,6 +342,9 @@ def run_summary_row(result: dict[str, Any]) -> dict[str, Any]:
         "num_train_epochs": cfg.get("num_train_epochs"),
         "seed": cfg.get("seed"),
         "dataset": cfg.get("dataset"),
+        "dataset_n": cfg.get("dataset_n"),
+        "dataset_fingerprint": cfg.get("dataset_fingerprint"),
+        "homework_level": cfg.get("homework_level"),
         "format_rate_before": before.get("format_rate"),
         "content_rate_before": before.get("content_rate"),
         "format_rate": after.get("format_rate"),
@@ -221,6 +354,9 @@ def run_summary_row(result: dict[str, Any]) -> dict[str, Any]:
         "training_seconds": train.get("training_seconds"),
         "executed_training_myself": result.get("executed_training_myself"),
     }
+    if not summary.get("homework_level"):
+        summary["homework_level"] = infer_homework_level(summary)
+    return summary
 
 
 def save_run(
@@ -1117,8 +1253,7 @@ def train_lora(
         train_msgs, valid_msgs = _split_messages_records(records)
         write_jsonl(train_msgs, work / "train.jsonl")
         write_jsonl(valid_msgs, work / "valid.jsonl")
-        cfg["dataset"] = str(jsonl_path.resolve())
-        cfg["dataset_n"] = len(records)
+        cfg = apply_dataset_meta(cfg, make_jsonl_dataset_meta(jsonl_path, records))
         # カスタムデータは FAQ gold 評価ができない
         skip_eval = True
         train_ds = Dataset.from_list(train_msgs)
@@ -1132,8 +1267,18 @@ def train_lora(
             "\n".join(json.dumps(r, ensure_ascii=False) for r in test), encoding="utf-8"
         )
         (work / "gold.json").write_text(json.dumps(gold, ensure_ascii=False, indent=2), encoding="utf-8")
-        cfg["dataset"] = "builtin_faq"
-        cfg["dataset_n"] = len(train)
+        dataset_id = str(cfg.get("dataset") or "builtin_faq")
+        cfg = apply_dataset_meta(
+            cfg,
+            make_faq_dataset_meta(
+                dataset_id=dataset_id,
+                faq=FAQ,
+                train=train,
+                valid=valid,
+                test=test,
+                gold=gold,
+            ),
+        )
 
         def to_chat(example: dict[str, Any]) -> dict[str, Any]:
             user = f"FAQ:\n{example['faq']}\n\n質問: {example['question']}"
@@ -1343,8 +1488,18 @@ def _cmd_make_dataset(args: argparse.Namespace) -> int:
 def _cmd_list(args: argparse.Namespace) -> int:
     work = Path(args.work_dir) if args.work_dir else None
     rows = list_runs(finetune_dir=Path(args.finetune_dir), work_dir=work)
+    rows = filter_runs(rows, dataset=args.dataset, fingerprint=args.fingerprint)
     if not rows:
         print("実験結果がありません（outputs/finetune/）。")
+        return 0
+    if args.group_by_dataset:
+        groups = list_dataset_groups(rows)
+        try:
+            import pandas as pd
+
+            print(pd.DataFrame(groups).to_string(index=False))
+        except ImportError:
+            print(json.dumps(groups, ensure_ascii=False, indent=2))
         return 0
     # 表形式（pandas が無ければ JSON）
     try:
@@ -1363,12 +1518,33 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     if args.run_ids:
         wanted = set(args.run_ids)
         rows = [r for r in rows if r.get("run_id") in wanted]
+    rows = filter_runs(rows, dataset=args.dataset, fingerprint=args.fingerprint)
     if not rows:
         print("比較対象がありません。")
         return 1
+
+    groups = list_dataset_groups(rows)
+    if len(groups) > 1 and not args.allow_mixed_dataset:
+        print("複数データセットが混在しています。データセット別に絞って比較してください。")
+        try:
+            import pandas as pd
+
+            print(pd.DataFrame(groups).to_string(index=False))
+        except ImportError:
+            print(json.dumps(groups, ensure_ascii=False, indent=2))
+        print(
+            "\n例: uv run python -m app.finetune compare --dataset <name>\n"
+            "    uv run python -m app.finetune compare --fingerprint <fp>\n"
+            "混在比較する場合は --allow-mixed-dataset を付けます。"
+        )
+        return 1
+
     cols = [
         "run_id",
         "run_note",
+        "dataset",
+        "dataset_fingerprint",
+        "dataset_n",
         "lora_r",
         "lr",
         "num_train_epochs",
@@ -1455,12 +1631,26 @@ def build_parser() -> argparse.ArgumentParser:
     l = sub.add_parser("list", help="実験一覧")
     l.add_argument("--finetune-dir", default=str(FINETUNE_DIR))
     l.add_argument("--work-dir", default=None)
+    l.add_argument("--dataset", default=None, help="dataset 名で絞る（例: builtin_faq）")
+    l.add_argument("--fingerprint", default=None, help="dataset_fingerprint で絞る")
+    l.add_argument(
+        "--group-by-dataset",
+        action="store_true",
+        help="dataset × fingerprint ごとの件数・最良スコアを表示",
+    )
     l.set_defaults(func=_cmd_list)
 
     c = sub.add_parser("compare", help="実験の比較表")
     c.add_argument("run_ids", nargs="*", help="比較する run_id（省略時は全部）")
     c.add_argument("--finetune-dir", default=str(FINETUNE_DIR))
     c.add_argument("--work-dir", default=None)
+    c.add_argument("--dataset", default=None, help="同じ dataset 内だけで比較")
+    c.add_argument("--fingerprint", default=None, help="同じ fingerprint（中身）内だけで比較")
+    c.add_argument(
+        "--allow-mixed-dataset",
+        action="store_true",
+        help="データセットが混在していても比較表を出す（通常は非推奨）",
+    )
     c.set_defaults(func=_cmd_compare)
 
     t = sub.add_parser("train", help="FAQ または messages JSONL で LoRA 学習")

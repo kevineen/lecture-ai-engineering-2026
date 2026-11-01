@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "note": "第2回 発展宿題用の自作評価セット。学習データ（glossary_sft.jsonl の質問テンプレ）とは言い回しを変えている。学習前後で同じ質問を使い、must_include で内容を見る。",
+  "scoring": {
+    "content_ok": "回答文字列に must_include の語がすべて含まれる",
+    "ungrounded_ok": "needs_review=true 相当（断定せず確認・不明を示す）。must_include のいずれかでも可とする運用でもよい",
+    "format": "本セットは用語集定義の自由文を正解とする（ノートブック FAQ の JSON 形式は必須にしない）"
+  },
+  "items": [
+    {
+      "id": "g1_lora_mechanism",
+      "kind": "in_glossary",
+      "term_id": "lora",
+      "question": "LoRA ではベースモデルの重みをどう扱い、実際に更新するのはどの部分ですか？",
+      "gold_answer": "事前学習済みの重みは固定したまま、重みの更新分を表す2つの小さな行列（低ランク行列／アダプタ）だけを学習する。",
+      "must_include": ["固定", "低ランク"],
+      "needs_review": false
+    },
+    {
+      "id": "g2_homework_levels",
+      "kind": "in_glossary",
+      "term_id": "homework-levels",
+      "question": "AIE2026 の宿題は何段階に分かれていて、どうすればその回は完了になりますか？",
+      "gold_answer": "「基礎」「実装」「発展」の3段階があり、どれか1つに取り組めばその回の宿題は完了。原則として採点はしない。",
+      "must_include": ["基礎", "実装", "発展"],
+      "needs_review": false
+    },
+    {
+      "id": "p1_peft_alias",
+      "kind": "paraphrase",
+      "term_id": "peft",
+      "question": "Parameter-Efficient Fine-Tuning を短く説明し、代表的な手法の名前を1つ挙げてください。",
+      "gold_answer": "モデルの全パラメータではなく、ごく一部や追加した小さなパラメータだけを学習する手法の総称。必要なGPUメモリと保存容量を大きく減らせる。代表例は LoRA。",
+      "must_include": ["一部", "LoRA"],
+      "needs_review": false
+    },
+    {
+      "id": "p2_qlora_alias",
+      "kind": "paraphrase",
+      "term_id": "qlora",
+      "question": "Quantized LoRA は普通の LoRA と比べて、どの工夫でメモリを節約しますか？",
+      "gold_answer": "ベースモデルの重みを4ビットなどに量子化してメモリを節約したうえで、LoRA で学習する。",
+      "must_include": ["量子化", "メモリ"],
+      "needs_review": false
+    },
+    {
+      "id": "u1_final_deadline",
+      "kind": "not_in_glossary",
+      "term_id": null,
+      "question": "AIE2026 の最終課題の提出締切は何月何日ですか？",
+      "gold_answer": "用語集・学習データに記載がないため断定できません。運営または講座資料で確認が必要です。",
+      "must_include": ["確認"],
+      "needs_review": true
+    },
+    {
+      "id": "u2_colab_quota",
+      "kind": "not_in_glossary",
+      "term_id": null,
+      "question": "第2回で使う Colab 無料枠の GPU は、1週間あたり何時間まで使えますか？",
+      "gold_answer": "用語集に数値の記載がないため断定できません。Google Colab の最新の利用枠を確認してください。",
+      "must_include": ["確認"],
+      "needs_review": true
+    }
+  ]
+}
