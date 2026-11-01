@@ -39,7 +39,15 @@ import streamlit as st
 import app.finetune as ft
 
 # ホットリロード時に古い app.finetune が sys.modules に残ることがある
-if not hasattr(ft, "get_vram_stats") or not hasattr(ft, "release_vram"):
+_FT_REQUIRED = (
+    "get_vram_stats",
+    "release_vram",
+    "load_glossary_eval",
+    "save_glossary_eval",
+    "infer_homework_level",
+    "evaluate_glossary_model",
+)
+if any(not hasattr(ft, name) for name in _FT_REQUIRED):
     ft = importlib.reload(ft)
 
 DEFAULT_WORK_DIR = Path("notebooks") / "qlora_lab"
@@ -517,8 +525,8 @@ def _render_custom_faq_editor(level: str) -> None:
 
 
 def _render_glossary_dataset_tools(level: str) -> None:
-    """発展向け: 用語集 JSONL と自作評価の確認。"""
-    st.markdown("#### 用語集 → SFT JSONL")
+    """発展向け: 用語集 JSONL 生成と自作評価セットの編集。"""
+    st.markdown("#### 用語集 → SFT JSONL（学習データ）")
     g_out = st.text_input(
         "glossary 出力",
         value=str(ft.SFT_DIR / "glossary_sft.jsonl"),
@@ -530,30 +538,117 @@ def _render_glossary_dataset_tools(level: str) -> None:
         st.session_state[_level_key(level, "last_saved_dataset")] = str(path.resolve())
         _refresh_caches()
 
-    eval_path = Path(HOMEWORK_LEVELS[level].get("eval_path") or (ft.SFT_DIR / "glossary_eval.json"))
-    st.markdown("#### 自作評価セット")
-    st.caption(f"`{eval_path.relative_to(_REPO_ROOT).as_posix()}`（学習前後で同じ質問を使う）")
-    if eval_path.is_file():
-        payload = json.loads(eval_path.read_text(encoding="utf-8"))
-        items = payload.get("items") or []
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "id": it.get("id"),
-                        "kind": it.get("kind"),
-                        "question": it.get("question"),
-                        "must_include": ", ".join(it.get("must_include") or []),
-                        "needs_review": it.get("needs_review"),
-                    }
-                    for it in items
-                ]
+    eval_path = Path(HOMEWORK_LEVELS[level].get("eval_path") or ft.GLOSSARY_EVAL_PATH)
+    st.divider()
+    st.markdown("#### 自作評価セット（追加・編集）")
+    st.caption(
+        f"保存先: `{eval_path.relative_to(_REPO_ROOT).as_posix()}`。"
+        " 種類は in_glossary / paraphrase / not_in_glossary。"
+        " `must_include` はカンマ区切り。② の学習で前後採点に使えます。"
+    )
+    eval_path_in = st.text_input(
+        "評価セットのパス",
+        value=str(eval_path),
+        key=_level_key(level, "eval_path"),
+    )
+    eval_file = Path(eval_path_in)
+    editor_key = _level_key(level, "glossary_eval_df")
+    meta_key = _level_key(level, "glossary_eval_meta")
+    loaded_key = _level_key(level, "glossary_eval_loaded_from")
+
+    if editor_key not in st.session_state or st.session_state.get(loaded_key) != str(eval_file):
+        payload = ft.load_glossary_eval(eval_file if eval_file.is_file() else None)
+        rows = ft.glossary_eval_to_editor_rows(payload)
+        if not rows:
+            rows = [
+                {
+                    "id": "g1",
+                    "kind": "in_glossary",
+                    "term_id": "",
+                    "question": "",
+                    "gold_answer": "",
+                    "must_include": "",
+                    "needs_review": False,
+                }
+            ]
+        st.session_state[editor_key] = pd.DataFrame(rows)
+        st.session_state[meta_key] = {
+            "version": payload.get("version", 1),
+            "note": payload.get("note", ""),
+            "scoring": payload.get("scoring") or {},
+        }
+        st.session_state[loaded_key] = str(eval_file)
+
+    note = st.text_input(
+        "評価セットのメモ",
+        value=str((st.session_state.get(meta_key) or {}).get("note") or ""),
+        key=_level_key(level, "eval_note"),
+    )
+    edited = st.data_editor(
+        st.session_state[editor_key],
+        num_rows="dynamic",
+        width="stretch",
+        column_config={
+            "id": st.column_config.TextColumn("id", width="small"),
+            "kind": st.column_config.SelectboxColumn(
+                "kind",
+                options=["in_glossary", "paraphrase", "not_in_glossary"],
+                required=True,
+                width="small",
             ),
-            width="stretch",
-            hide_index=True,
-        )
-    else:
-        st.warning("glossary_eval.json がありません。先に自作評価を用意してください。")
+            "term_id": st.column_config.TextColumn("term_id", width="small"),
+            "question": st.column_config.TextColumn("質問", width="large", required=True),
+            "gold_answer": st.column_config.TextColumn("正解（参考）", width="large"),
+            "must_include": st.column_config.TextColumn(
+                "must_include（カンマ区切り）", width="medium"
+            ),
+            "needs_review": st.column_config.CheckboxColumn("needs_review", default=False),
+        },
+        key=_level_key(level, "glossary_eval_editor"),
+    )
+    st.session_state[editor_key] = edited
+
+    n_q = sum(1 for r in edited.fillna("").to_dict(orient="records") if str(r.get("question", "")).strip())
+    st.caption(f"編集中の質問数: {n_q}")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("評価セットを保存", type="primary", key=_level_key(level, "save_eval")):
+            base = dict(st.session_state.get(meta_key) or ft.default_glossary_eval_payload())
+            base["note"] = note
+            payload = ft.editor_rows_to_glossary_eval(
+                edited.fillna("").to_dict(orient="records"),
+                base=base,
+            )
+            path = ft.save_glossary_eval(payload, eval_file)
+            st.session_state[meta_key] = {
+                "version": payload.get("version", 1),
+                "note": payload.get("note", ""),
+                "scoring": payload.get("scoring") or {},
+            }
+            st.session_state[loaded_key] = str(path)
+            st.success(f"{len(payload.get('items') or [])} 問 → {path.resolve()}")
+    with c2:
+        if st.button("ファイルから再読込", key=_level_key(level, "reload_eval")):
+            st.session_state.pop(editor_key, None)
+            st.session_state.pop(loaded_key, None)
+            st.rerun()
+    with c3:
+        if st.button("空の1行を追加テンプレ", key=_level_key(level, "add_eval_row")):
+            blank = {
+                "id": f"q{n_q + 1}",
+                "kind": "in_glossary",
+                "term_id": "",
+                "question": "",
+                "gold_answer": "",
+                "must_include": "",
+                "needs_review": False,
+            }
+            st.session_state[editor_key] = pd.concat(
+                [st.session_state[editor_key], pd.DataFrame([blank])],
+                ignore_index=True,
+            )
+            st.rerun()
 
 
 def render_dataset_tab(level: str) -> None:
@@ -603,16 +698,21 @@ def _run_queue(
     author: str,
     run_memo: str,
     homework_level: str,
+    glossary_eval_path: Path | None = None,
 ) -> None:
     """キューを上から順に学習し、全体進捗バーとログを表示する。"""
     batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    effective_skip = bool(skip_eval)
+    if train_jsonl and glossary_eval_path is None:
+        effective_skip = True
     ft.append_ui_train_history(
         {
             "batch_id": batch_id,
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "dataset": str(train_jsonl) if train_jsonl else "builtin_faq",
             "work_dir": work_dir,
-            "skip_eval": bool(skip_eval or train_jsonl),
+            "skip_eval": effective_skip,
+            "glossary_eval_path": str(glossary_eval_path) if glossary_eval_path else None,
             "lab_id": lab_id,
             "author": author,
             "homework_level": homework_level,
@@ -660,6 +760,7 @@ def _run_queue(
                 run_note=note,
                 skip_eval=bool(skip_eval),
                 train_jsonl=train_jsonl,
+                glossary_eval_path=glossary_eval_path,
                 progress_callback=_on_progress,
                 lab_id=lab_id,
                 memo=run_memo.strip() or None,
@@ -667,7 +768,11 @@ def _run_queue(
             )
             rid = str(result.get("run_id"))
             results_ok.append(rid)
-            logs.append(f"OK: {rid}")
+            after = result.get("after") or {}
+            logs.append(
+                f"OK: {rid} | content_rate={after.get('content_rate')} "
+                f"loss={(result.get('train') or {}).get('last_loss')}"
+            )
             log_box.code("\n".join(logs[-40:]))
         except ImportError as e:
             st.error(
@@ -696,14 +801,16 @@ def render_train_tab(level: str) -> None:
     st.write(
         "各行が1実験です。上から順に学習し、進捗バーとログを更新します。"
         " 既定 FAQ を選ぶと学習前後の format/content 評価も入ります。"
-        " オリジナル JSONL の場合は評価をスキップし、loss・学習時間を記録します。"
+        " 発展では ① の自作評価セットで学習前後を採点できます。"
     )
     if level == "基礎":
         st.caption("基礎では「既定 FAQ・評価あり」＋ HP 1 変更が基本です。")
     elif level == "実装":
         st.caption("実装では ① で作った独自 FAQ JSONL を選んで学習します。")
     else:
-        st.caption("発展では glossary_sft.jsonl を選び、評価は自作セットで別途記録します。")
+        st.caption(
+            "発展: glossary_sft.jsonl で学習し、① の glossary_eval.json で前後採点 → ③ で比較。"
+        )
 
     work_dir = st.text_input(
         "work_dir（チェックポイント等）",
@@ -741,11 +848,41 @@ def render_train_tab(level: str) -> None:
         name = ds_choice.split(" (", 1)[0]
         train_jsonl = ft.SFT_DIR / name
 
-    skip_eval = st.checkbox(
-        "評価をスキップ（高速・デバッグ用。カスタム JSONL では自動スキップ）",
-        value=(level == "発展"),
-        key=_level_key(level, "skip_eval"),
-    )
+    glossary_eval_path: Path | None = None
+    if level == "発展":
+        default_eval = str(profile.get("eval_path") or ft.GLOSSARY_EVAL_PATH)
+        use_ge = st.checkbox(
+            "① の自作評価セットで学習前後を採点する",
+            value=True,
+            key=_level_key(level, "use_glossary_eval"),
+            help="must_include で content_rate を計算し、result.json / ③比較に残します。",
+        )
+        eval_path_train = st.text_input(
+            "評価セットパス",
+            value=default_eval,
+            key=_level_key(level, "train_eval_path"),
+            disabled=not use_ge,
+        )
+        if use_ge:
+            glossary_eval_path = Path(eval_path_train)
+            if glossary_eval_path.is_file():
+                n_eval = len(ft.load_glossary_eval(glossary_eval_path).get("items") or [])
+                st.caption(f"評価質問: {n_eval} 問")
+            else:
+                st.warning("評価セットファイルがありません。① で保存してください。")
+        skip_eval = st.checkbox(
+            "評価をスキップ（loss・時間のみ）",
+            value=not use_ge,
+            key=_level_key(level, "skip_eval"),
+        )
+        if skip_eval:
+            glossary_eval_path = None
+    else:
+        skip_eval = st.checkbox(
+            "評価をスキップ（高速・デバッグ用。カスタム JSONL では自動スキップ）",
+            value=False,
+            key=_level_key(level, "skip_eval"),
+        )
 
     labs = _filter_labs_for_level(_cached_list_labs(), level)
     lab_choices = ["（なし）"] + [str(x["lab_id"]) for x in labs]
@@ -882,6 +1019,13 @@ def render_train_tab(level: str) -> None:
         if level == "発展" and train_jsonl is None:
             st.error("発展では glossary JSONL を先に ① で生成してから選んでください。")
             return
+        if level == "発展" and glossary_eval_path is not None:
+            if not glossary_eval_path.is_file():
+                st.error("自作評価セットがありません。① で保存してから学習してください。")
+                return
+            if not (ft.load_glossary_eval(glossary_eval_path).get("items") or []):
+                st.error("自作評価セットが空です。① で質問を追加して保存してください。")
+                return
         queue = hp_edited.dropna(how="all").to_dict(orient="records")
         queue = [r for r in queue if str(r.get("run_note", "")).strip()]
         if not queue:
@@ -897,6 +1041,7 @@ def render_train_tab(level: str) -> None:
                 author=train_author,
                 run_memo=train_run_memo,
                 homework_level=level,
+                glossary_eval_path=glossary_eval_path,
             )
 
 

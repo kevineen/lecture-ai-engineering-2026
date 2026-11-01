@@ -38,6 +38,7 @@ FINETUNE_DIR = OUTPUTS_DIR / "finetune"
 LABS_DIR = FINETUNE_DIR / "labs"
 SFT_DIR = REPO_ROOT / "data" / "sft"
 GLOSSARY_PATH = REPO_ROOT / "data" / "glossary.json"
+GLOSSARY_EVAL_PATH = SFT_DIR / "glossary_eval.json"
 
 # ノートブックと同じ既定 CONFIG（パス系は呼び出し側で上書き）
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -693,6 +694,109 @@ def faq_editor_rows_to_jsonl(rows: list[dict[str, Any]], path: Path, faq_text: s
     return write_jsonl(records, path)
 
 
+def default_glossary_eval_payload() -> dict[str, Any]:
+    """空の自作評価セット（メタ付き）。"""
+    return {
+        "version": 1,
+        "note": "第2回 発展宿題用の自作評価セット。学習前後で同じ質問を使い、must_include で内容を見る。",
+        "scoring": {
+            "content_ok": "回答文字列に must_include の語がすべて含まれる",
+            "ungrounded_ok": "needs_review=true のときも must_include（例: 確認）で見る",
+            "format": "自由文（JSON 形式は必須にしない。format_rate は常に 1.0）",
+        },
+        "items": [],
+    }
+
+
+def load_glossary_eval(path: Path | None = None) -> dict[str, Any]:
+    """glossary_eval.json を読む。無ければ空テンプレ。"""
+    p = Path(path) if path is not None else GLOSSARY_EVAL_PATH
+    if not p.is_file():
+        return default_glossary_eval_payload()
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"glossary eval はオブジェクトである必要があります: {p}")
+    data.setdefault("items", [])
+    return data
+
+
+def save_glossary_eval(payload: dict[str, Any], path: Path | None = None) -> Path:
+    """自作評価セットを JSON で保存する。"""
+    p = Path(path) if path is not None else GLOSSARY_EVAL_PATH
+    p.parent.mkdir(parents=True, exist_ok=True)
+    out = dict(payload)
+    out.setdefault("version", 1)
+    out.setdefault("items", [])
+    p.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return p
+
+
+def glossary_eval_to_editor_rows(payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """評価 items → Streamlit 表行（must_include はカンマ区切り）。"""
+    data = payload if payload is not None else load_glossary_eval()
+    rows: list[dict[str, Any]] = []
+    for it in data.get("items") or []:
+        must = it.get("must_include") or []
+        if isinstance(must, str):
+            must_s = must
+        else:
+            must_s = ", ".join(str(x) for x in must)
+        rows.append(
+            {
+                "id": str(it.get("id") or ""),
+                "kind": str(it.get("kind") or "in_glossary"),
+                "term_id": "" if it.get("term_id") is None else str(it.get("term_id")),
+                "question": str(it.get("question") or ""),
+                "gold_answer": str(it.get("gold_answer") or ""),
+                "must_include": must_s,
+                "needs_review": bool(it.get("needs_review", False)),
+            }
+        )
+    return rows
+
+
+def editor_rows_to_glossary_eval(
+    rows: list[dict[str, Any]],
+    *,
+    base: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """表行 → glossary_eval payload。空質問行は落とす。"""
+    payload = dict(base or default_glossary_eval_payload())
+    items: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        q = str(row.get("question", "")).strip()
+        if not q:
+            continue
+        must_raw = row.get("must_include", "")
+        if isinstance(must_raw, list):
+            must = [str(x).strip() for x in must_raw if str(x).strip()]
+        else:
+            must = [p.strip() for p in str(must_raw).split(",") if p.strip()]
+        kind = str(row.get("kind") or "in_glossary").strip() or "in_glossary"
+        rid = str(row.get("id") or "").strip() or f"q{i + 1}"
+        term_raw = str(row.get("term_id") or "").strip()
+        items.append(
+            {
+                "id": rid,
+                "kind": kind,
+                "term_id": term_raw or None,
+                "question": q,
+                "gold_answer": str(row.get("gold_answer") or "").strip(),
+                "must_include": must,
+                "needs_review": bool(row.get("needs_review", False)),
+            }
+        )
+    payload["items"] = items
+    return payload
+
+
+def check_glossary_content(raw: str, item: dict[str, Any]) -> bool:
+    """自由文回答が must_include をすべて含むか。"""
+    text = raw or ""
+    must = item.get("must_include") or []
+    return all(str(w) in text for w in must)
+
+
 def _dataset_memo_path(name: str, *, sft_dir: Path = SFT_DIR) -> Path:
     """データセット（data/sft の JSONL）に対応するメモ sidecar のパス。"""
     return Path(sft_dir) / "memos" / f"{Path(name).stem}.memo.json"
@@ -1191,6 +1295,77 @@ def evaluate_model(
     return summary, rows
 
 
+def evaluate_glossary_model(
+    model: Any,
+    tok: Any,
+    items: list[dict[str, Any]],
+    config: dict[str, Any],
+    label: str,
+    *,
+    work_dir: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """自作 glossary 評価セット（自由文 + must_include）で採点する。"""
+    import torch
+
+    def generate(question: str) -> str:
+        prompt = tok.apply_chat_template(
+            [{"role": "user", "content": question}],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        inputs = tok(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=config["max_new_tokens"],
+                pad_token_id=tok.pad_token_id,
+                **config["gen"],
+            )
+        return tok.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True).strip()
+
+    rows: list[dict[str, Any]] = []
+    t0 = time.time()
+    for item in items:
+        q = str(item.get("question") or "").strip()
+        if not q:
+            continue
+        raw = generate(q)
+        ok_content = check_glossary_content(raw, item)
+        # 自由文評価なので形式は常に OK（FAQ JSON は要求しない）
+        rows.append(
+            {
+                "question": q,
+                "raw": raw,
+                "format_ok": True,
+                "format_reason": "",
+                "content_ok": ok_content,
+                "both_ok": ok_content,
+                "gold_needs_review": bool(item.get("needs_review", False)),
+                "kind": item.get("kind"),
+                "must_include": list(item.get("must_include") or []),
+            }
+        )
+    n = len(rows)
+    summary = {
+        "label": label,
+        "n": n,
+        "format_rate": (sum(r["format_ok"] for r in rows) / n) if n else None,
+        "content_rate": (sum(r["content_ok"] for r in rows) / n) if n else None,
+        "both_rate": (sum(r["both_ok"] for r in rows) / n) if n else None,
+        "seconds": round(time.time() - t0, 1),
+        "eval_kind": "glossary",
+    }
+    if work_dir is not None:
+        work = Path(work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / f"eval_{label}.json").write_text(
+            json.dumps({"summary": summary, "rows": rows}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return summary, rows
+
+
 def train_lora(
     config: dict[str, Any] | None = None,
     *,
@@ -1198,6 +1373,7 @@ def train_lora(
     run_note: str | None = None,
     skip_eval: bool = False,
     train_jsonl: Path | None = None,
+    glossary_eval_path: Path | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     lab_id: str | None = None,
     memo: str | None = None,
@@ -1206,7 +1382,8 @@ def train_lora(
     """LoRA 学習し、result.json を保存して返す。
 
     既定は FAQ 分割データ（評価あり）。`train_jsonl` を渡すと messages JSONL で学習し、
-    FAQ 評価はスキップする（カスタムデータに gold が無いため）。
+    既定では FAQ 評価をスキップする。`glossary_eval_path` を渡し `skip_eval=False`
+    なら自作評価セットで学習前後を採点する（発展宿題向け）。
     `lab_id` / `memo` を渡すと実験 ID 紐づけと run メモを保存する
     （`memo_author` はメモの記録者名）。
 
@@ -1242,6 +1419,21 @@ def train_lora(
     use_custom = train_jsonl is not None
     test: list[dict[str, Any]] = []
     gold: dict[str, dict] = {}
+    glossary_items: list[dict[str, Any]] = []
+    if glossary_eval_path is not None:
+        ge_path = Path(glossary_eval_path)
+        ge_payload = load_glossary_eval(ge_path)
+        glossary_items = list(ge_payload.get("items") or [])
+        if not glossary_items:
+            raise ValueError(f"自作評価セットが空です: {ge_path}")
+        cfg["glossary_eval_path"] = str(ge_path.resolve())
+        cfg["glossary_eval_n"] = len(glossary_items)
+
+    # カスタム JSONL は FAQ gold が無い。glossary_eval が無ければ評価スキップ。
+    if use_custom and not glossary_items:
+        skip_eval = True
+    use_glossary_eval = bool(glossary_items) and not skip_eval
+
     if use_custom:
         jsonl_path = Path(train_jsonl)
         records = read_jsonl(jsonl_path)
@@ -1254,8 +1446,6 @@ def train_lora(
         write_jsonl(train_msgs, work / "train.jsonl")
         write_jsonl(valid_msgs, work / "valid.jsonl")
         cfg = apply_dataset_meta(cfg, make_jsonl_dataset_meta(jsonl_path, records))
-        # カスタムデータは FAQ gold 評価ができない
-        skip_eval = True
         train_ds = Dataset.from_list(train_msgs)
         valid_ds = Dataset.from_list(valid_msgs)
     else:
@@ -1315,6 +1505,11 @@ def train_lora(
             "seconds": 0,
         }
         before_rows = []
+    elif use_glossary_eval:
+        _progress("before_eval", 0.15, "学習前評価中（自作 glossary セット）…")
+        before_summary, before_rows = evaluate_glossary_model(
+            model, tok, glossary_items, cfg, "before", work_dir=work
+        )
     else:
         _progress("before_eval", 0.15, "学習前評価中…")
         before_summary, before_rows = evaluate_model(
@@ -1409,6 +1604,17 @@ def train_lora(
         after_rows: list[dict[str, Any]] = []
         regressed: list[str] = []
         knowledge_rows: list[dict[str, Any]] = []
+    elif use_glossary_eval:
+        _progress("after_eval", 0.9, "学習後評価中（自作 glossary セット）…")
+        after_summary, after_rows = evaluate_glossary_model(
+            tuned, tok, glossary_items, cfg, "after", work_dir=work
+        )
+        regressed = [
+            b["question"]
+            for b, a in zip(before_rows, after_rows)
+            if b["both_ok"] and not a["both_ok"]
+        ]
+        knowledge_rows = []
     else:
         _progress("after_eval", 0.9, "学習後評価中…")
         after_summary, after_rows = evaluate_model(

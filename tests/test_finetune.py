@@ -12,12 +12,15 @@ from app.finetune import (
     builtin_faq_editor_rows,
     faq_example_to_editor_row,
     build_result,
+    check_glossary_content,
     compare_config_diffs,
     create_lab,
+    editor_rows_to_glossary_eval,
     extract_last_loss,
     faq_example_to_messages,
     filter_runs,
     get_vram_stats,
+    glossary_eval_to_editor_rows,
     infer_homework_level,
     iter_glossary_sft_records,
     link_run_to_lab,
@@ -27,6 +30,7 @@ from app.finetune import (
     list_sft_datasets,
     load_common_memo,
     load_dataset_memo,
+    load_glossary_eval,
     load_lab,
     load_run_eval,
     load_run_memo,
@@ -39,6 +43,7 @@ from app.finetune import (
     run_summary_row,
     save_common_memo,
     save_dataset_memo,
+    save_glossary_eval,
     save_run,
     save_run_memo,
     save_shared_memo,
@@ -228,6 +233,40 @@ def test_make_dataset_glossary(tmp_path: Path) -> None:
     assert len(lines) == len(iter_glossary_sft_records())
     obj = json.loads(lines[0])
     assert obj["messages"][0]["role"] == "user"
+
+
+def test_glossary_eval_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "glossary_eval.json"
+    rows = [
+        {
+            "id": "g1",
+            "kind": "in_glossary",
+            "term_id": "lora",
+            "question": "LoRA とは？",
+            "gold_answer": "低ランクで固定した重みを保つ",
+            "must_include": "固定, 低ランク",
+            "needs_review": False,
+        },
+        {
+            "id": "u1",
+            "kind": "not_in_glossary",
+            "term_id": "",
+            "question": "締切は？",
+            "gold_answer": "確認が必要",
+            "must_include": "確認",
+            "needs_review": True,
+        },
+    ]
+    payload = editor_rows_to_glossary_eval(rows)
+    assert len(payload["items"]) == 2
+    assert payload["items"][0]["must_include"] == ["固定", "低ランク"]
+    save_glossary_eval(payload, path)
+    loaded = load_glossary_eval(path)
+    back = glossary_eval_to_editor_rows(loaded)
+    assert back[0]["question"] == "LoRA とは？"
+    assert "低ランク" in back[0]["must_include"]
+    assert check_glossary_content("重みは固定し低ランク行列だけ学ぶ", payload["items"][0])
+    assert not check_glossary_content("わかりません", payload["items"][0])
 
 
 def test_make_dataset_faq(tmp_path: Path) -> None:
