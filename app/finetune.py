@@ -473,6 +473,36 @@ def faq_example_to_messages(example: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def faq_example_to_editor_row(example: dict[str, Any]) -> dict[str, Any]:
+    """FAQ 学習例を Streamlit エディタ行（question / answer / needs_review）にする。"""
+    needs = bool(example.get("needs_review", False))
+    answer = ""
+    target = example.get("target")
+    if isinstance(target, str) and target.strip():
+        try:
+            parsed = json.loads(target)
+            answer = str(parsed.get("answer", ""))
+            if "needs_review" in parsed:
+                needs = bool(parsed["needs_review"])
+        except json.JSONDecodeError:
+            answer = target
+    return {
+        "question": str(example.get("question", "")),
+        "answer": answer,
+        "needs_review": needs,
+    }
+
+
+def builtin_faq_editor_rows(split: str = "train") -> list[dict[str, Any]]:
+    """既定 FAQ の train / valid / test をエディタ行一覧として返す。"""
+    train, valid, test, _ = build_faq_splits()
+    mapping = {"train": train, "valid": valid, "test": test}
+    key = split.lower().strip()
+    if key not in mapping:
+        raise ValueError(f"未知の split: {split}（train / valid / test）")
+    return [faq_example_to_editor_row(ex) for ex in mapping[key]]
+
+
 def write_jsonl(records: list[dict[str, Any]], path: Path) -> Path:
     """JSONL を書き出す。"""
     path = Path(path)
@@ -1163,7 +1193,8 @@ def train_lora(
         learning_rate=cfg["lr"],
         lr_scheduler_type="cosine",
         warmup_steps=cfg["warmup_steps"],
-        logging_steps=10,
+        # 短い学習（例: epochs=2 → 4 step）でも loss が log_history に残るよう 1 にする
+        logging_steps=1,
         save_steps=10,
         save_total_limit=2,
         fp16=False,
@@ -1202,9 +1233,15 @@ def train_lora(
     trainer.model.print_trainable_parameters()
     _progress("train", 0.2, "学習開始…")
     t0 = time.time()
-    trainer.train()
+    train_out = trainer.train()
     training_seconds = round(time.time() - t0, 1)
+    # log_history 優先。短い run でログが空でも TrainOutput.training_loss で埋める
     last_loss = extract_last_loss(trainer.state.log_history)
+    if last_loss is None:
+        try:
+            last_loss = float(train_out.training_loss)
+        except (AttributeError, TypeError, ValueError):
+            last_loss = None
     print(
         f"学習時間: {training_seconds:.0f} 秒 | ステップ数: {trainer.state.global_step} "
         f"| エポック: {trainer.state.epoch:.1f} | last_loss: {last_loss}"

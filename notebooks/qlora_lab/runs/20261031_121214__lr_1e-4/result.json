@@ -15,7 +15,9 @@
     "gen": {
       "do_sample": false
     },
-    "run_note": "lr=1e-4"
+    "run_note": "lr=1e-4",
+    "dataset": "builtin_faq",
+    "dataset_n": 14
   },
   "versions": {
     "transformers": "5.18.0",

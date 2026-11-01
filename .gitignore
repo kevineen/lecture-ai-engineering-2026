@@ -13,6 +13,14 @@ learning_log/
 # 第1回など: モデル比較の実験ログ（temperature 等の設定・応答）は共有しない
 outputs/
 
+# LoRA / QLoRA の重い成果物（adapter・optimizer 等は手元のみ）
+*.safetensors
+**/optimizer.pt
+**/rng_state.pth
+**/scheduler.pt
+**/training_args.bin
+notebooks/qlora_lab/ckpt/**/tokenizer.json
+
 # データセットごとのメモ（sidecar）も個人用の学習ログとして共有しない
 data/sft/memos/
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import sys
 import traceback
 from datetime import datetime
@@ -112,6 +113,40 @@ def _prefer_columns(df: pd.DataFrame, prefer: tuple[str, ...]) -> pd.DataFrame:
     """優先順に列を並べ直す（無い列は飛ばし、余った列は後ろに付ける）。"""
     cols = [c for c in prefer if c in df.columns] + [c for c in df.columns if c not in prefer]
     return df[cols]
+
+
+def _rates_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    """提出・比較用に format_rate / content_rate（学習前・後）だけを見やすくした表。"""
+    label_col = "run_note" if "run_note" in df.columns else "run_id"
+    mapping = [
+        (label_col, "実験"),
+        ("format_rate_before", "format_rate（前）"),
+        ("content_rate_before", "content_rate（前）"),
+        ("format_rate", "format_rate（後）"),
+        ("content_rate", "content_rate（後）"),
+        ("last_loss", "last_loss"),
+        ("training_seconds", "学習秒"),
+    ]
+    present = [(src, title) for src, title in mapping if src in df.columns]
+    if not present:
+        return pd.DataFrame()
+    out = df[[src for src, _ in present]].copy()
+    out.columns = [title for _, title in present]
+    # 率は小数第3位まで（提出メモ用）
+    for col in out.columns:
+        if "format_rate" in col or "content_rate" in col:
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(3)
+    return out
+
+
+def _render_rates_comparison(cmp_df: pd.DataFrame) -> None:
+    """選択 run の format_rate / content_rate を表で表示する。"""
+    st.markdown("#### format_rate / content_rate（提出用）")
+    rates = _rates_display_df(cmp_df)
+    if rates.empty:
+        st.caption("選択した実験に format_rate / content_rate がありません。")
+        return
+    st.dataframe(rates, width="stretch", hide_index=True)
 
 
 def _row_to_config(row: dict[str, Any]) -> dict[str, Any]:
@@ -250,12 +285,65 @@ def _render_common_memo_section() -> None:
     )
 
 
+def _faq_rows_summary(rows: list[dict[str, Any]]) -> str:
+    """件数と needs_review 内訳の短い要約。"""
+    n = len(rows)
+    n_review = sum(1 for r in rows if bool(r.get("needs_review")))
+    return f"{n} 件（needs_review=true: {n_review} / false: {n - n_review}）"
+
+
 def render_dataset_tab() -> None:
     st.subheader("独自 FAQ / Q&A から messages JSONL を作る")
     st.write(
         "質問・回答・`needs_review` を編集し、学習用の `messages` 形式 JSONL を保存します。"
         " FAQ 本文も差し替え可能です（宿題「実装」向け）。"
+        " 上のベース（既定 FAQ）と見比べながら、下の表でオリジナルを作れます。"
     )
+
+    # --- ベース（既定 FAQ） ---
+    st.markdown("#### ベースデータセット（既定 FAQ）")
+    st.caption(
+        "ノートブック / 学習タブの「既定 FAQ・評価あり」と同じ分割。"
+        " train が学習に使われる 14 件です。"
+    )
+    base_split = st.radio(
+        "表示する分割",
+        options=["train", "valid", "test"],
+        horizontal=True,
+        key="base_faq_split",
+        format_func=lambda s: {
+            "train": "train（学習・14件）",
+            "valid": "valid（7件）",
+            "test": "test（評価・21件）",
+        }[s],
+    )
+    base_rows = ft.builtin_faq_editor_rows(base_split)
+    st.caption(f"ベース {base_split}: {_faq_rows_summary(base_rows)}")
+    st.dataframe(
+        pd.DataFrame(base_rows),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "question": st.column_config.TextColumn("質問", width="large"),
+            "answer": st.column_config.TextColumn("answer", width="large"),
+            "needs_review": st.column_config.CheckboxColumn("needs_review"),
+        },
+    )
+    load_c1, load_c2 = st.columns(2)
+    with load_c1:
+        if st.button("表示中の分割をエディタへ読み込む", key="load_base_split"):
+            st.session_state.custom_editor_df = pd.DataFrame(base_rows)
+            st.success(f"ベース {base_split}（{len(base_rows)} 件）をエディタに読み込みました。")
+            st.rerun()
+    with load_c2:
+        if st.button("train 14 件をエディタへ読み込む", key="load_base_train"):
+            train_rows = ft.builtin_faq_editor_rows("train")
+            st.session_state.custom_editor_df = pd.DataFrame(train_rows)
+            st.success(f"ベース train（{len(train_rows)} 件）をエディタに読み込みました。")
+            st.rerun()
+
+    st.divider()
+    st.markdown("#### オリジナル（編集）")
 
     col_name, col_out = st.columns(2)
     with col_name:
@@ -276,6 +364,13 @@ def render_dataset_tab() -> None:
 
     if "custom_editor_df" not in st.session_state:
         st.session_state.custom_editor_df = pd.DataFrame(DEFAULT_EDITOR_ROWS)
+
+    custom_rows = st.session_state.custom_editor_df.fillna("").to_dict(orient="records")
+    custom_rows = [r for r in custom_rows if str(r.get("question", "")).strip()]
+    st.caption(
+        f"編集中: {_faq_rows_summary(custom_rows)} ／ ベース train: "
+        f"{_faq_rows_summary(ft.builtin_faq_editor_rows('train'))}"
+    )
 
     edited = st.data_editor(
         st.session_state.custom_editor_df,
@@ -628,20 +723,28 @@ def render_compare_tab() -> None:
         df,
         (
             "run_id",
-            "lab_id",
             "run_note",
+            "format_rate_before",
+            "content_rate_before",
+            "format_rate",
+            "content_rate",
+            "last_loss",
+            "training_seconds",
+            "lab_id",
             "memo_preview",
             "dataset",
             "lora_r",
             "lr",
             "num_train_epochs",
-            "format_rate",
-            "content_rate",
-            "last_loss",
-            "training_seconds",
         ),
     )
+    st.markdown("#### 全実験一覧")
     st.dataframe(df, width="stretch")
+    # 一覧でも率がすぐ見えるよう、先頭に提出用の要約を出す
+    all_rates = _rates_display_df(df)
+    if not all_rates.empty:
+        with st.expander("format_rate / content_rate だけ表示（全実験）", expanded=True):
+            st.dataframe(all_rates, width="stretch", hide_index=True)
 
     run_ids = [str(r.get("run_id")) for r in rows if r.get("run_id")]
     default_pick = st.session_state.get("last_compare_ids") or run_ids[-min(4, len(run_ids)) :]
@@ -652,6 +755,7 @@ def render_compare_tab() -> None:
         cmp_df = df[df["run_id"].isin(pick)].copy()
         st.write("選択した実験")
         st.dataframe(cmp_df, width="stretch")
+        _render_rates_comparison(cmp_df)
 
         results = []
         for rid in pick:
@@ -705,8 +809,33 @@ def _run_label(rid: str, results_by_id: dict[str, dict[str, Any]]) -> str:
     return str((results_by_id.get(rid) or {}).get("run_note") or rid)
 
 
+def _loose_parse_obj(raw: str) -> dict[str, Any] | None:
+    """評価行の raw から JSON オブジェクトを緩く取り出す（evaluate_model と同じ方針）。"""
+    ok, _, obj = ft.check_format(raw)
+    if ok and isinstance(obj, dict):
+        return obj
+    m = re.search(r"\{.*\}", raw or "", re.S)
+    if not m:
+        return None
+    try:
+        loose = json.loads(m.group(0))
+    except Exception:
+        return None
+    return loose if isinstance(loose, dict) else None
+
+
+def _response_stance(row: dict[str, Any] | None) -> str:
+    """ノートブック classify 相当。asserted / needs_review / format_error / —。"""
+    if row is None:
+        return "—"
+    obj = _loose_parse_obj(str(row.get("raw") or ""))
+    if obj is None or not isinstance(obj.get("needs_review"), bool):
+        return "format_error"
+    return "needs_review" if obj["needs_review"] else "asserted"
+
+
 def _result_cell(row: dict[str, Any] | None) -> str:
-    """評価行を ✓ / ✗ 表記にする。"""
+    """評価行を ✓ / ✗ 表記にする。根拠なしへの言い切りは「断定✗」と明示する。"""
     if row is None:
         return "—"
     f_ok, c_ok = bool(row.get("format_ok")), bool(row.get("content_ok"))
@@ -716,18 +845,301 @@ def _result_cell(row: dict[str, Any] | None) -> str:
     if not f_ok:
         parts.append("形式✗")
     if not c_ok:
-        parts.append("内容✗")
+        stance = _response_stance(row)
+        if row.get("gold_needs_review") and stance == "asserted":
+            parts.append("断定✗")
+        elif (not row.get("gold_needs_review")) and stance == "needs_review":
+            parts.append("逃げ✗")
+        else:
+            parts.append("内容✗")
     return "+".join(parts)
 
 
+def _stance_cell(row: dict[str, Any] | None) -> str:
+    """根拠なし質問向けの短い分類セル。"""
+    if row is None:
+        return "—"
+    stance = _response_stance(row)
+    if stance == "asserted":
+        return "断定✗"
+    if stance == "needs_review":
+        # needs_review でも必須語不足なら内容 NG
+        if row.get("content_ok"):
+            return "確認✓"
+        return "確認（内容✗）"
+    if stance == "format_error":
+        return "形式✗"
+    return "—"
+
+
 def _color_status_cell(value: Any) -> str:
-    """✓ / ✗ セルの着色（Styler 用）。"""
+    """✓ / ✗ セルの着色（Styler 用）。断定は濃い赤で目立たせる。"""
     text = str(value)
-    if text == "✓":
+    if text in {"✓", "確認✓"}:
         return "background-color: #e8f5e9; color: #1b5e20"
+    if "断定" in text:
+        return "background-color: #ffcdd2; color: #b71c1c; font-weight: 600"
     if "✗" in text:
         return "background-color: #fbe9e7; color: #b71c1c"
     return ""
+
+
+def _ungrounded_questions(
+    questions: list[str],
+    active: list[str],
+    evals_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    """gold_needs_review=True の質問だけを返す。"""
+    out: list[str] = []
+    for q in questions:
+        for rid in active:
+            a = _row_for_question(
+                list((evals_by_id[rid].get("after") or {}).get("rows") or []), q
+            )
+            b = _row_for_question(
+                list((evals_by_id[rid].get("before") or {}).get("rows") or []), q
+            )
+            if (a or {}).get("gold_needs_review") or (b or {}).get("gold_needs_review"):
+                out.append(q)
+                break
+    return out
+
+
+def _md_escape_cell(text: Any) -> str:
+    """markdown 表セル用に | と改行を潰す。"""
+    return str(text or "").replace("|", "\\|").replace("\n", " ")
+
+
+def _render_asserted_comparison(
+    active: list[str],
+    results_by_id: dict[str, dict[str, Any]],
+    evals_by_id: dict[str, dict[str, Any]],
+    questions: list[str],
+) -> None:
+    """根拠なし質問への言い切り（asserted）を run 横断で比較する。"""
+    st.markdown("#### 根拠なしへの断定（asserted）比較")
+    ungrounded = _ungrounded_questions(questions, active, evals_by_id)
+    if not ungrounded:
+        st.caption("根拠なし質問（gold: needs_review）が評価データにありません。")
+        _render_knowledge_comparison(active, results_by_id)
+        return
+
+    st.caption(
+        "FAQ に無い質問で `needs_review: false`（言い切り）になったものを強調します。"
+        "宿題の「根拠なしに断定した」失敗型の確認用です。"
+    )
+
+    # run ごとの断定件数
+    summary_rows: list[dict[str, Any]] = []
+    for rid in active:
+        asserted_n = 0
+        review_n = 0
+        fmt_n = 0
+        for q in ungrounded:
+            a = _row_for_question(
+                list((evals_by_id[rid].get("after") or {}).get("rows") or []), q
+            )
+            stance = _response_stance(a)
+            if stance == "asserted":
+                asserted_n += 1
+            elif stance == "needs_review":
+                review_n += 1
+            elif stance == "format_error":
+                fmt_n += 1
+        summary_rows.append(
+            {
+                "run": _run_label(rid, results_by_id),
+                "根拠なし数": len(ungrounded),
+                "断定✗": asserted_n,
+                "確認": review_n,
+                "形式✗": fmt_n,
+            }
+        )
+    sum_df = pd.DataFrame(summary_rows)
+
+    def _color_assert_count(value: Any) -> str:
+        if isinstance(value, (int, float)) and value > 0:
+            return "background-color: #ffcdd2; color: #b71c1c; font-weight: 600"
+        if value == 0:
+            return "background-color: #e8f5e9; color: #1b5e20"
+        return ""
+
+    st.dataframe(
+        sum_df.style.map(_color_assert_count, subset=["断定✗"]),
+        width="stretch",
+        hide_index=True,
+    )
+
+    # 質問 × run の分類表（断定をすぐ見つける）
+    only_asserted = st.checkbox(
+        "いずれかの run で断定した質問だけ表示",
+        value=True,
+        key="cmp_only_asserted",
+    )
+    focus_qs = ungrounded
+    if only_asserted:
+        focus_qs = [
+            q
+            for q in ungrounded
+            if any(
+                _response_stance(
+                    _row_for_question(
+                        list((evals_by_id[rid].get("after") or {}).get("rows") or []), q
+                    )
+                )
+                == "asserted"
+                for rid in active
+            )
+        ]
+    if not focus_qs:
+        st.info("選択 run の学習後で、根拠なしへの断定はありません。")
+    else:
+        matrix: list[dict[str, str]] = []
+        for q in focus_qs:
+            row: dict[str, str] = {"質問": q}
+            before_cell = "—"
+            for rid in active:
+                b = _row_for_question(
+                    list((evals_by_id[rid].get("before") or {}).get("rows") or []), q
+                )
+                if b is not None:
+                    before_cell = _stance_cell(b)
+                    break
+            row["before"] = before_cell
+            for rid in active:
+                a = _row_for_question(
+                    list((evals_by_id[rid].get("after") or {}).get("rows") or []), q
+                )
+                row[_run_label(rid, results_by_id)] = _stance_cell(a)
+            matrix.append(row)
+        mdf = pd.DataFrame(matrix)
+        st.dataframe(
+            mdf.style.map(_color_status_cell, subset=list(mdf.columns[1:])),
+            width="stretch",
+            height=min(420, 35 * (len(matrix) + 1) + 12),
+            hide_index=True,
+        )
+
+        # 断定質問の返答を横並び比較
+        pick_q = st.selectbox(
+            "断定まわりの返答を比較する質問",
+            focus_qs,
+            format_func=lambda q: f"{q}（断定あり）",
+            key="cmp_asserted_question",
+        )
+        b_ref = None
+        for rid in active:
+            b_ref = _row_for_question(
+                list((evals_by_id[rid].get("before") or {}).get("rows") or []), pick_q
+            )
+            if b_ref is not None:
+                break
+        if b_ref is not None:
+            st.caption("before（学習前）")
+            st.code(str(b_ref.get("raw") or "（評価なし）"), language=None)
+
+        lines = [
+            "| run | 分類 | 内容 | after 返答 |",
+            "|---|---|---|---|",
+        ]
+        for rid in active:
+            a = _row_for_question(
+                list((evals_by_id[rid].get("after") or {}).get("rows") or []), pick_q
+            )
+            stance = _stance_cell(a)
+            ok_c = "✓" if (a or {}).get("content_ok") else ("✗" if a else "—")
+            lines.append(
+                f"| **{_run_label(rid, results_by_id)}** | {stance} | {ok_c} "
+                f"| {_md_escape_cell((a or {}).get('raw')) or '（評価なし）'} |"
+            )
+        st.markdown("\n".join(lines))
+
+    _render_knowledge_comparison(active, results_by_id)
+
+
+def _render_knowledge_comparison(
+    active: list[str],
+    results_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """result.json の knowledge（ノートブックセクション6）があれば run 横断表示する。"""
+    knowledge_by_id: dict[str, list[dict[str, Any]]] = {}
+    for rid in active:
+        rows = list((results_by_id.get(rid) or {}).get("knowledge") or [])
+        if rows:
+            knowledge_by_id[rid] = rows
+    if not knowledge_by_id:
+        return
+
+    st.markdown("##### 知識質問（result.json knowledge）")
+    st.caption(
+        "ノートブックセクション6の分類。CLI 学習では空のことが多いです。"
+        "学習後が `asserted` かつ FAQ に無い質問は根拠なし断定です。"
+    )
+    # 質問キーは日本語列名か英語の両方に備える
+    def _k_q(row: dict[str, Any]) -> str:
+        return str(row.get("質問") or row.get("question") or "")
+
+    def _k_after(row: dict[str, Any]) -> str:
+        return str(row.get("学習後の分類") or row.get("after_class") or "")
+
+    def _k_before(row: dict[str, Any]) -> str:
+        return str(row.get("学習前の分類") or row.get("before_class") or "")
+
+    def _k_in_faq(row: dict[str, Any]) -> bool:
+        v = row.get("FAQ にある", row.get("in_faq"))
+        return bool(v)
+
+    qs: list[str] = []
+    seen: set[str] = set()
+    for rid in active:
+        for row in knowledge_by_id.get(rid) or []:
+            q = _k_q(row)
+            if q and q not in seen:
+                seen.add(q)
+                qs.append(q)
+    matrix: list[dict[str, str]] = []
+    for q in qs:
+        row_out: dict[str, str] = {"質問": q}
+        in_faq = False
+        for rid in active:
+            hit = next((r for r in (knowledge_by_id.get(rid) or []) if _k_q(r) == q), None)
+            if hit is not None:
+                in_faq = _k_in_faq(hit)
+                break
+        row_out["FAQにある"] = "yes" if in_faq else "no"
+        for rid in active:
+            hit = next((r for r in (knowledge_by_id.get(rid) or []) if _k_q(r) == q), None)
+            label = _run_label(rid, results_by_id)
+            if hit is None:
+                row_out[label] = "—"
+                continue
+            after = _k_after(hit)
+            # FAQ に無い asserted を断定✗ と揃える
+            if after == "asserted" and not in_faq:
+                row_out[label] = "断定✗"
+            elif after == "needs_review":
+                row_out[label] = "確認✓"
+            elif after == "asserted":
+                row_out[label] = "asserted"
+            else:
+                row_out[label] = after or "—"
+            # before は共通列に1回だけ
+            if "before" not in row_out or row_out["before"] == "—":
+                row_out["before"] = _k_before(hit) or "—"
+        # before を FAQ の次に寄せるため並べ替えは DataFrame 側で
+        matrix.append(row_out)
+    if not matrix:
+        return
+    kdf = pd.DataFrame(matrix)
+    preferred = ["質問", "FAQにある", "before"] + [
+        c for c in kdf.columns if c not in {"質問", "FAQにある", "before"}
+    ]
+    kdf = kdf.reindex(columns=[c for c in preferred if c in kdf.columns])
+    st.dataframe(
+        kdf.style.map(_color_status_cell, subset=[c for c in kdf.columns if c not in {"質問", "FAQにある"}]),
+        width="stretch",
+        hide_index=True,
+    )
 
 
 def _render_output_comparison(pick: list[str], results_by_id: dict[str, dict[str, Any]]) -> None:
@@ -770,7 +1182,10 @@ def _render_output_comparison(pick: list[str], results_by_id: dict[str, dict[str
         regressed_union |= {str(q) for q in (result.get("regressed") or [])}
 
     # --- 全質問 × 選択 run の ✓/✗ 表（学習後・before は先頭 run のものを参考表示） ---
-    st.caption("全質問の形式・内容判定。⚠ 付きの質問はいずれかの run で悪化しています。")
+    st.caption(
+        "全質問の形式・内容判定。⚠ は悪化。"
+        "根拠なしへの言い切りは「断定✗」、根拠ありへの確認逃げは「逃げ✗」。"
+    )
     matrix: list[dict[str, str]] = []
     for q in questions:
         row: dict[str, str] = {"質問": f"⚠ {q}" if q in regressed_union else q}
@@ -796,6 +1211,9 @@ def _render_output_comparison(pick: list[str], results_by_id: dict[str, dict[str
         height=min(720, 35 * (len(matrix) + 1) + 12),
     )
 
+    # 根拠なし断定の専用比較（宿題の失敗型確認）
+    _render_asserted_comparison(active, results_by_id, evals_by_id, questions)
+
     # --- 選択した質問の返答比較 ---
     question = st.selectbox(
         "返答を見る質問",
@@ -814,10 +1232,7 @@ def _render_output_comparison(pick: list[str], results_by_id: dict[str, dict[str
         st.caption("before（学習前・ベースモデル）の返答")
         st.code(str(b_ref.get("raw") or "（評価なし）"), language=None)
 
-    def _md_cell(text: Any) -> str:
-        return str(text or "").replace("|", "\\|").replace("\n", " ")
-
-    lines = ["| run | 形式 | 内容 | after 返答 | 形式 NG 理由 |", "|---|---|---|---|---|"]
+    lines = ["| run | 形式 | 内容 | 分類 | after 返答 | 形式 NG 理由 |", "|---|---|---|---|---|---|"]
     for rid in active:
         result = results_by_id.get(rid) or {}
         a = _row_for_question(
@@ -826,10 +1241,11 @@ def _render_output_comparison(pick: list[str], results_by_id: dict[str, dict[str
         mark = " ⚠" if question in {str(q) for q in (result.get("regressed") or [])} else ""
         ok_f = "✓" if (a or {}).get("format_ok") else ("✗" if a else "—")
         ok_c = "✓" if (a or {}).get("content_ok") else ("✗" if a else "—")
+        stance = _stance_cell(a) if a else "—"
         reason = str((a or {}).get("format_reason") or "—") if (a and not a.get("format_ok")) else "—"
         lines.append(
-            f"| **{_run_label(rid, results_by_id)}**{mark} | {ok_f} | {ok_c} "
-            f"| {_md_cell((a or {}).get('raw')) or '（評価なし）'} | {_md_cell(reason) or '—'} |"
+            f"| **{_run_label(rid, results_by_id)}**{mark} | {ok_f} | {ok_c} | {stance} "
+            f"| {_md_escape_cell((a or {}).get('raw')) or '（評価なし）'} | {_md_escape_cell(reason) or '—'} |"
         )
     st.markdown("\n".join(lines))
 

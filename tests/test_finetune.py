@@ -8,6 +8,8 @@ from pathlib import Path
 from app.finetune import (
     append_ui_train_history,
     build_faq_splits,
+    builtin_faq_editor_rows,
+    faq_example_to_editor_row,
     build_result,
     compare_config_diffs,
     create_lab,
@@ -146,6 +148,14 @@ def test_faq_splits_and_messages() -> None:
     msg = faq_example_to_messages(train[0])
     assert msg["messages"][0]["role"] == "system"
     assert msg["messages"][-1]["role"] == "assistant"
+    row = faq_example_to_editor_row(train[0])
+    assert row["question"] == train[0]["question"]
+    assert row["answer"]
+    assert row["needs_review"] is False
+    assert len(builtin_faq_editor_rows("train")) == 14
+    assert len(builtin_faq_editor_rows("valid")) == 7
+    assert len(builtin_faq_editor_rows("test")) == 21
+    assert builtin_faq_editor_rows("train")[0].keys() >= {"question", "answer", "needs_review"}
 
 
 def test_make_dataset_glossary(tmp_path: Path) -> None:

@@ -1,0 +1,56 @@
+{
+  "run_id": "20261101_084026__lr_1e-5",
+  "run_note": "lr=1e-5",
+  "lab_id": null,
+  "memo": "",
+  "config": {
+    "base_model": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "seed": 42,
+    "num_train_epochs": 20,
+    "warmup_steps": 6,
+    "lr": 1e-05,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "max_seq_len": 512,
+    "max_new_tokens": 96,
+    "gen": {
+      "do_sample": false
+    },
+    "run_note": "lr=1e-5",
+    "dataset": "builtin_faq",
+    "dataset_n": 14
+  },
+  "versions": {
+    "transformers": "5.18.0",
+    "peft": "0.21.1",
+    "trl": "1.14.2",
+    "torch": "2.11.0+cu128"
+  },
+  "method": "LoRA（量子化なし）",
+  "train": {
+    "last_loss": 1.67611083984375,
+    "training_seconds": 90.1,
+    "global_step": 40,
+    "epoch": 20.0
+  },
+  "before": {
+    "label": "before",
+    "n": 21,
+    "format_rate": 0.09523809523809523,
+    "content_rate": 0.0,
+    "both_rate": 0.0,
+    "seconds": 28.3
+  },
+  "after": {
+    "label": "after",
+    "n": 21,
+    "format_rate": 1.0,
+    "content_rate": 0.8571428571428571,
+    "both_rate": 0.8571428571428571,
+    "seconds": 55.0
+  },
+  "regressed": [],
+  "knowledge": [],
+  "executed_training_myself": true
+}

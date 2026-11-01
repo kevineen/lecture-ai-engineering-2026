@@ -41,6 +41,7 @@ docs の詳細ルールは `docs/agent/INSTRUCTIONS.md`、学習メモは `docs/
 
 - `AGENTS.md` … エージェント入口（第2回: finetune / Streamlit / uv group 注意を含む）
 - `docs/usage/git-workflow.md` … 提出ブランチと `personal/lab` の運用
+- `docs/usage/lec02-homework.md` … 第2回：演習〜宿題（基礎/実装/発展）。各段階で提出可
 - `docs/usage/finetune.md` … CLI・依存・HP 比較・result.json
 - `docs/usage/streamlit.md` … UI・トラブルシュート
 - `docs/usage/INDEX.md`

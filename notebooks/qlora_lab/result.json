@@ -1,11 +1,13 @@
 {
-  "run_id": "20261031_121438__epochs_10",
-  "run_note": "epochs=10",
+  "run_id": "20261101_113253__epochs_2",
+  "run_note": "epochs=2",
+  "lab_id": null,
+  "memo": "",
   "config": {
     "base_model": "Qwen/Qwen3.5-0.8B",
     "revision": "2fc06364715b967f1860aea9cf38778875588b17",
     "seed": 42,
-    "num_train_epochs": 10,
+    "num_train_epochs": 2,
     "warmup_steps": 6,
     "lr": 0.0002,
     "lora_r": 16,
@@ -15,7 +17,9 @@
     "gen": {
       "do_sample": false
     },
-    "run_note": "epochs=10"
+    "run_note": "epochs=2",
+    "dataset": "builtin_faq",
+    "dataset_n": 14
   },
   "versions": {
     "transformers": "5.18.0",
@@ -25,10 +29,10 @@
   },
   "method": "LoRA（量子化なし）",
   "train": {
-    "last_loss": 0.09880012273788452,
-    "training_seconds": 38.6,
-    "global_step": 20,
-    "epoch": 10.0
+    "last_loss": 2.122771978378296,
+    "training_seconds": 8.6,
+    "global_step": 4,
+    "epoch": 2.0
   },
   "before": {
     "label": "before",
@@ -36,15 +40,15 @@
     "format_rate": 0.09523809523809523,
     "content_rate": 0.0,
     "both_rate": 0.0,
-    "seconds": 24.3
+    "seconds": 21.1
   },
   "after": {
     "label": "after",
     "n": 21,
     "format_rate": 1.0,
-    "content_rate": 0.9047619047619048,
-    "both_rate": 0.9047619047619048,
-    "seconds": 51.4
+    "content_rate": 0.8571428571428571,
+    "both_rate": 0.8571428571428571,
+    "seconds": 37.2
   },
   "regressed": [],
   "knowledge": [],
