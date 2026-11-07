@@ -3,7 +3,7 @@
 ## 演習
 
 - 第1回（素のLLM）とエージェントの回答の違い：きちんと手元資料を参照した内容になっている
-- `--trace` で見えたツール呼び出し（ツール名と引数）：search_glossary, {'query' : 'LoRA}
+- `--trace` で見えたツール呼び出し（ツール名と引数）：search_glossary, {'query' : 'LoRA'}
 - 1つの質問での LLM 呼び出し回数（`requests`）：2
 - 追加したツールと、docstring に書いた説明：
     make_quiz(lecture: int) -> str:
@@ -15,14 +15,13 @@
 
 ## 宿題
 
-- 取り組んだレベル：基礎
-- やったこと：ツールを作成し、登録。指定回のない場合に、lecturesフォルダから用意されている回ナンバーをglossaryのデータから抽出して回答するようにした。
-INSTRUCTIONSに"- 用語を調べたら、ヒットした lecture で必ず get_lecture_summary も呼び、要約した内容を簡潔に返答する。"という内容を追記し、ツール呼び出し回数を増やした。
-
-同じ質問「AIE2026の講座で使う「lecNN-start タグ」とは何ですか？」を --trace で比較した。
-変更前: search_glossary(query='lecNN-start タグ') のみ（tool_calls=1, requests=2）。回答は用語定義中心。
-変更後: search_glossary のあと get_lecture_summary(lecture=1) も呼ばれた（tool_calls=2, requests=3）。
-回答に第1回の講義要点（開発環境・リポジトリの扱い）が混ざるようになった。
-
-- 結果：ツール呼び出し回数が増え、要約内容を回答するようにした。
-- 気づき・疑問：AIへの指示が上手くいかないと微妙に違う目的が提案されるため、間違いという分けではないが確認が必要だという事を再認識した。
+- 取り組んだレベル：実装
+- やったこと：
+  - `save_learning_log` ツールを追加し、学習記録を `learning_log/` に保存する
+  - 保存前に利用者確認を挟む（Pydantic AI の `requires_approval=True`）
+  - TestModel を使ったテストを追加する（パス: ）
+- 結果：
+  - 保存されたファイル例：
+  - `--trace` で見えた承認・ツール呼び出し：
+  - テスト結果：
+- 気づき・疑問：
