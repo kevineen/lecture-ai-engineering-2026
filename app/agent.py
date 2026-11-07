@@ -34,7 +34,7 @@ INSTRUCTIONS = """\
 - 回の内容を聞かれたら get_lecture_summary を使う。
 - 用語集に見つからないことは、推測で断定せず「用語集にはない」と伝える。
 - 回答の最後に、関係する回（第N回）を示す。
-- 宿題の答えそのものは書かず、考え方のヒントで導く。
+- 用語を調べたら、ヒットした lecture で必ず get_lecture_summary も呼び、要約した内容を簡潔に返答する。
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
@@ -43,6 +43,10 @@ agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
 
 # TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
+def make_quiz(lecture: int) -> str:
+    """第3回: 確認問題を出すツール。"""
+    return tools.make_quiz(lecture)
+agent.tool_plain(tools.make_quiz)
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -115,6 +119,7 @@ def main() -> None:
     parser.add_argument("--trace", action="store_true", help="ツール呼び出しを表示する")
     parser.add_argument("--mcp", action="store_true", help="第5回: ツールを MCP サーバー（app/mcp_servers.json）から受け取る")
     parser.add_argument("--list-tools", action="store_true", help="モデルに見えるツール一覧を表示して終了する（APIキー不要）")
+    parser.add_argument("--lecture", type=int, help="第3回: 確認問題を出す回（1始まりの整数）")
     args = parser.parse_args()
 
     target = build_mcp_agent() if args.mcp else agent
