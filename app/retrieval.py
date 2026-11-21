@@ -124,8 +124,41 @@ def open_index(path: Path):
         db.close()
 
 
+def with_adjacent_pages(hits: list[dict]) -> list[dict]:
+    """検索ヒットに、同一 document_id 内の前後1ページを重複なく足してフラットに返す。
+
+    ヒットを先に並べ、その後に前後ページを追加する。
+    """
+    pages = load_pages(RAG_SOURCE)
+    by_doc_page = {(page["document_id"], page["page"]): page for page in pages}
+    seen: set[str] = set()
+    results: list[dict] = []
+
+    def append_page(page: dict) -> None:
+        page_id = page["page_id"]
+        if page_id in seen:
+            return
+        seen.add(page_id)
+        # ヒット由来の distance などは残し、前後ページは load_pages の項目のみ
+        results.append(dict(page))
+
+    for hit in hits:
+        append_page(hit)
+    for hit in hits:
+        for offset in (-1, 1):
+            neighbor = by_doc_page.get((hit["document_id"], hit["page"] + offset))
+            if neighbor is not None:
+                append_page(neighbor)
+    return results
+
+
 def search(query: str) -> list[dict]:
-    """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
+    """質問を埋め込み、近いページと同一資料の前後1ページを返す。"""
+    return with_adjacent_pages(vector_search(query))
+
+
+def vector_search(query: str) -> list[dict]:
+    """質問を埋め込み、近いページを最大RAG_TOP_K件返す（前後ページは付けない）。"""
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
     with open_index(RAG_DB) as db:
@@ -151,7 +184,8 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    # Graph の入口はベクトル上位のみ（前後マージ後だと種子がずれる）
+    seeds = [hit for hit in vector_search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
