@@ -15,8 +15,11 @@ def materials(tmp_path):
     source.write_text(json.dumps([
         {"id": f"lec{n:02d}-main", "title": f"講義{n}", "content": [
             {"section": "章", "content": [
-                {"id": f"lec{n:02d}-main-p001", "title": f"ページ{n}",
-                 "page": 1, "content": f"本文{n}"}]}]}
+                {"id": f"lec{n:02d}-main-p001", "title": f"ページ{n}-1",
+                 "page": 1, "content": f"本文{n}-1"},
+                {"id": f"lec{n:02d}-main-p002", "title": f"ページ{n}-2",
+                 "page": 2, "content": f"本文{n}-2"},
+            ]}]}
         for n in (1, 2, 5)
     ], ensure_ascii=False), encoding="utf-8")
     return source, tmp_path / "index.sqlite3"
@@ -29,17 +32,51 @@ def test_built_index_can_be_searched(materials, monkeypatch):
     def embed(text, task):
         assert task == "RETRIEVAL_DOCUMENT"
         texts.append(text)
-        return [1, 0] if "本文1" in text else [0, 1]
+        return [1, 0] if "本文1-1" in text else [0, 1]
 
     result = build_index(source, database, embedder=embed)
-    assert result["pages"] == 2  # 第5回の資料は検索対象に含めない
+    assert result["pages"] == 4  # 第1・2回のみ。各2ページ。第5回は対象外
     assert all("章" in text and "ページ" in text for text in texts)
     monkeypatch.setattr(retrieval, "RAG_DB", database)
+    monkeypatch.setattr(retrieval, "RAG_SOURCE", source)
     monkeypatch.setattr(retrieval, "embed_text", lambda *_: [1, 0])
+    # ベクトル上位のみ（前後なし）
+    vector_hits = retrieval.vector_search("質問")
+    assert [h["page_id"] for h in vector_hits] == [
+        "lec01-main-p001", "lec01-main-p002", "lec02-main-p001", "lec02-main-p002",
+    ]
+    assert vector_hits[0]["content"] == "本文1-1"
+    assert vector_hits[0]["distance"] == pytest.approx(0)
+    # 通常検索はヒット＋同一資料の前後ページ（重複除外・ヒット優先）
     hits = retrieval.search("質問")
-    assert [h["page_id"] for h in hits] == ["lec01-main-p001", "lec02-main-p001"]
-    assert hits[0]["content"] == "本文1"
-    assert hits[0]["distance"] == pytest.approx(0)
+    assert [h["page_id"] for h in hits] == [
+        "lec01-main-p001", "lec01-main-p002", "lec02-main-p001", "lec02-main-p002",
+    ]
+
+
+def test_with_adjacent_pages_merges_prev_next(monkeypatch, tmp_path):
+    source = tmp_path / "lectures.json"
+    source.write_text(json.dumps([{
+        "id": "lec01-main", "title": "講義1", "content": [{
+            "section": "章", "content": [
+                {"id": "lec01-main-p001", "title": "p1", "page": 1, "content": "本文1"},
+                {"id": "lec01-main-p002", "title": "p2", "page": 2, "content": "本文2"},
+                {"id": "lec01-main-p003", "title": "p3", "page": 3, "content": "本文3"},
+            ],
+        }],
+    }], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(retrieval, "RAG_SOURCE", source)
+    hits = [{
+        "page_id": "lec01-main-p002", "document_id": "lec01-main", "lecture": 1,
+        "document_title": "講義1", "section": "章", "title": "p2", "page": 2,
+        "content": "本文2", "distance": 0.1,
+    }]
+    merged = retrieval.with_adjacent_pages(hits)
+    assert [p["page_id"] for p in merged] == [
+        "lec01-main-p002", "lec01-main-p001", "lec01-main-p003",
+    ]
+    assert merged[0]["distance"] == pytest.approx(0.1)
+    assert "distance" not in merged[1]
 
 
 def test_existing_index_survives_failed_rebuild(materials):
